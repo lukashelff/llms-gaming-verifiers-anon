@@ -1,0 +1,8 @@
+# Core dependencies
+pandas>=1.5
+tqdm>=4.60
+
+# System dependency (not pip-installable):
+# SWI-Prolog must be installed separately; the `swipl` binary must be on PATH.
+# Ubuntu/Debian: sudo apt-get install swi-prolog
+# macOS:         brew install swi-prolog
