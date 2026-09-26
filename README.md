@@ -1,13 +1,9 @@
 # LLMs Gaming Verifiers: RLVR can Lead to Reward Hacking
 
 [![arXiv](https://img.shields.io/badge/arXiv-2604.15149-b31b1b.svg)](https://arxiv.org/abs/2604.15149)
-[![HF Leaderboard](https://img.shields.io/badge/🤗_HF-Leaderboard-ffd21e)](https://huggingface.co/spaces/AIML-TUDA/slr-leaderboard)
-[![HF Evaluator (IPT)](https://img.shields.io/badge/🤗_HF-IPT_Evaluator-ffd21e)](https://huggingface.co/spaces/AIML-TUDA/IsomorphicPerturbationTesting)
-[![SLR-Bench](https://img.shields.io/badge/🤗_HF-SLR--Bench-ffd21e)](https://huggingface.co/datasets/AIML-TUDA/SLR-Bench)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 
-🆕 May 2026: IPT is now also available for the whole [SLR-Bench suite](https://hf.co/collections/AIML-TUDA/scalable-logical-reasoning) (including multilingual splits and OOD)
 
 > LLMs are increasingly trained with reinforcement learning from verifiable rewards (RLVR), which boosts their performance on problems whose answers can be checked automatically. But it can also teach them to exploit the verifier rather than solve the task. We test this on inductive reasoning: a model sees a few labeled examples and must write a general rule that explains them. In our evaluation we find that some LLMs systematically abandon rule induction. Rather than inferring relational rules (e.g., "a train is eastbound if it has a long car"), they enumerate instance-level labels (e.g., "train0 is eastbound, train2 is eastbound"). While such outputs fail the intended task of rule induction, they may game imperfect verifiers that only check extensional correctness on the provided examples.
 
@@ -26,7 +22,7 @@ Isomorphic Perturbation Testing (IPT) exposes these shortcuts and provides a met
 ### 1. Installation
 
 ```bash
-git clone https://github.com/ml-research/llms-gaming-verifiers.git
+git clone <this anonymous repository>
 cd llm-verifier-gaming
 
 
@@ -87,7 +83,7 @@ We also provide IPT as a standalone `evaluate` module, which can be used to eval
 ```python
 from evaluate import load
 
-ipt = load("AIML-TUDA/IsomorphicPerturbationTesting")
+ipt = load("IPT")  # the evaluate module in this repository
 
 # Three candidate hypotheses
 genuine_rule        = "eastbound(T) :- has_car(T, C), car_color(C, red)."

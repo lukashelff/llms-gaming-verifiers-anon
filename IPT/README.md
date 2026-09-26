@@ -54,7 +54,7 @@ arbitrary domains and languages beyond trains).
 ```python
 from evaluate import load
 
-ipt = load("AIML-TUDA/IsomorphicPerturbationTesting")
+ipt = load("IPT")
 
 # Three candidate hypotheses
 genuine_rule        = "eastbound(T) :- has_car(T, C), car_color(C, red)."

@@ -162,7 +162,7 @@ class IsomorphicPerturbationTesting(evaluate.Metric):
     Usage::
 
         from evaluate import load
-        ipt = load("AIML-TUDA/IsomorphicPerturbationTesting")
+        ipt = load("IPT")
 
         results = ipt.compute(
             predictions=["eastbound(T) :- has_car(T, C), car_color(C, red)."],
@@ -200,7 +200,7 @@ class IsomorphicPerturbationTesting(evaluate.Metric):
                     },
                 },
             }),
-            codebase_urls=["https://github.com/ml-research/llms-gaming-verifiers"],
+            codebase_urls=[],
             reference_urls=["https://huggingface.co/datasets/AIML-TUDA/SLR-Bench"],
         )
 
