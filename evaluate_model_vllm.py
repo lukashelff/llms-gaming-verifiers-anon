@@ -108,7 +108,8 @@ def merge_lora_weights(base_model_path, lora_path, output_path):
 
 def load_vllm_model(model_path, max_seq_length=8096,
                     tensor_parallel_size=None,
-                    distributed_executor_backend=None):
+                    distributed_executor_backend=None,
+                    seed=None):
     """Load model using vLLM for optimized inference."""
 
     print(f"Loading model with vLLM...")
@@ -192,6 +193,8 @@ def load_vllm_model(model_path, max_seq_length=8096,
         args['reasoning_parser'] = 'gemma4'
   
           
+    if seed is not None:
+        args["seed"] = seed
     print(f"Model path: {model_path} with args: {args}")
     # Initialize vLLM model with spawn-safe settings
     llm = LLM(**args)
@@ -316,7 +319,7 @@ def get_chat_template_kwargs_for_model(model_name: str, enable_thinking: bool, r
 DEFAULT_SEED = 42
 
 
-def evaluate_model_vllm(llm, tokenizer, test_dataset, max_new_tokens=512, enable_thinking=False, cot_phrase: str | None = None, reasoning_effort: str | None = None):
+def evaluate_model_vllm(llm, tokenizer, test_dataset, max_new_tokens=512, enable_thinking=False, cot_phrase: str | None = None, reasoning_effort: str | None = None, positive_predicate: str = "eastbound", negative_predicate: str = "westbound", temperature: float | None = None):
     """Evaluate the model using vLLM for fast inference."""
     
     model_name = llm.llm_engine.model_config.model
@@ -353,15 +356,22 @@ def evaluate_model_vllm(llm, tokenizer, test_dataset, max_new_tokens=512, enable
         problem_ids.append(example["id"])
         ground_truths.append(example["ground-truth rule"])
         validation_programs.append(example["validation program"])
+        # Also collect the extensional (shortcuts) version if available — required by IPT.
+        # Fall back to "" for old datasets; IPT/shortcuts.py legacy fallback will synthesize.
+    validation_programs_shortcuts = [ex.get("validation_program_shortcuts", "") for ex in test_dataset]
     
     # Set up optimized sampling parameters for better logical reasoning
     # Determine stop tokens based on model type
+    extra_sp = {}
+    if temperature is not None:
+        extra_sp["temperature"] = temperature
     sampling_params = get_sampling_params_for_model(
         model_name,
         tokenizer,
         llm,
         reasoning_effort=reasoning_effort,
-        max_tokens=max_new_tokens
+        max_tokens=max_new_tokens,
+        **extra_sp
     )
     
     # Alternative: Greedy decoding for deterministic, focused outputs
@@ -384,11 +394,9 @@ def evaluate_model_vllm(llm, tokenizer, test_dataset, max_new_tokens=512, enable
 
     print(f"Using sampling: {sampling_params}")
     print(f"Generating predictions with vLLM using {'greedy decoding' if sampling_params.temperature == 0.0 else 'sampling'} strategy...")
-    if has_chat_tmpl and not 'deepseek' in model_id and 'olmo' not in model_id.lower():
+    if has_chat_tmpl and not 'deepseek' in model_id:
         messages = [[{"role": "user", "content": p}] for p in input_prompts]
         outputs = llm.chat(messages, **kargs)
-    elif 'olmo' in model_id.lower():
-        outputs = llm.generate(input_prompts, sampling_params)
     else:
         print("Using standard generation...")
         outputs = llm.generate(formatted_prompts, sampling_params)
@@ -419,9 +427,10 @@ def evaluate_model_vllm(llm, tokenizer, test_dataset, max_new_tokens=512, enable
                 "ground_truth": ground_truths[i],
                 "reference": {
                     "validation_program": validation_programs[i],
+                    "validation_program_shortcuts": validation_programs_shortcuts[i],
                     "evaluation_config": {
-                        "positive_predicate": "eastbound",
-                        "negative_predicate": "westbound"
+                        "positive_predicate": positive_predicate,
+                        "negative_predicate": negative_predicate,
                     }
                 }
         })
@@ -460,6 +469,29 @@ def main():
                         help="Reasoning effort for supported models (e.g., GPT-OSS).")
     parser.add_argument("--rerun-truncated", action="store_true",
                         help="Re-run only samples that hit the token limit in an existing run, then merge results.")
+    parser.add_argument("--rerun-ids", default=None,
+                        help="Comma-separated problem ids to re-run in an existing run (merged like --rerun-truncated).")
+    parser.add_argument("--nocheat", action="store_true",
+                    help="Append 'Do not cheat.' to every prompt (prompt-intervention run); tag gets '-nocheat'.")
+    parser.add_argument("--tag", default=None,
+                        help="Override the output subdirectory name (default derived from model and flags).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed (overrides default 42). Appended to output tag to avoid collisions.")
+    parser.add_argument("--temperature", type=float, default=None,
+                        help="Override sampling temperature (default: model-specific in get_sampling_params_for_model). "
+                             "Appended to output tag to avoid collisions when set.")
+    parser.add_argument("--dataset", default="AIML-TUDA/SLR-Bench",
+                        help="HuggingFace dataset repo (e.g. AIML-TUDA/SLR-Bench-German, AIML-TUDA/SLR-Homes).")
+    parser.add_argument("--dataset-config", default="v1-All",
+                        help="HuggingFace dataset config name. Pass '' for datasets without configs (e.g. SLR-Homes).")
+    parser.add_argument("--positive-predicate", default="eastbound",
+                        help="Positive-class predicate for IPT eval_config. "
+                             "SLR-Bench=eastbound, -German=ost, -Spanish=este, "
+                             "-French/-Italian=est, -Portuguese=leste, SLR-Homes=modern.")
+    parser.add_argument("--negative-predicate", default="westbound",
+                        help="Negative-class predicate for IPT eval_config. "
+                             "SLR-Bench=westbound, -German=west, -Spanish/-Portuguese=oeste, "
+                             "-French=ouest, -Italian=ovest, SLR-Homes=traditional.")
     args = parser.parse_args()
 
     # Resolve model path/id from unified and legacy args
@@ -476,8 +508,16 @@ def main():
         tag += "-Thinking"
     if args.cot:
         tag += "-CoT"
+    if args.nocheat:
+        tag += "-nocheat"
     if args.reasoning_effort:
         tag += f"-effort-{args.reasoning_effort}"
+    if args.seed is not None:
+        tag += f"-seed{args.seed}"
+    if args.temperature is not None:
+        tag += f"-temp{args.temperature}"
+    if args.tag:
+        tag = args.tag
     if args.out_path:
         out_dir = os.path.join(args.out_path, tag)
     else:
@@ -488,7 +528,12 @@ def main():
     existing_outputs = None
     truncated_ids = None
     if os.path.exists(outputs_file_path):
-        if args.rerun_truncated:
+        if args.rerun_ids:
+            with open(outputs_file_path) as f:
+                existing_outputs = json.load(f)
+            truncated_ids = {int(x) for x in args.rerun_ids.split(",") if x.strip()}
+            print(f"--rerun-ids: re-running {len(truncated_ids)} samples: {sorted(truncated_ids)}")
+        elif args.rerun_truncated:
             with open(outputs_file_path) as f:
                 existing_outputs = json.load(f)
             # Determine old token limit from meta.json
@@ -541,8 +586,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
     # Load test dataset
-    print(f"Loading SLR-Bench test dataset...")
-    test_set = load_dataset("AIML-TUDA/SLR-Bench", "v1-All", split="test")
+    print(f"Loading {args.dataset} test split...")
+    try:
+        test_set = load_dataset(args.dataset, args.dataset_config or None, split="test")
+    except (ValueError, FileNotFoundError):
+        # Datasets without configs (e.g. SLR-Homes) fail on the config arg
+        test_set = load_dataset(args.dataset, split="test")
     
     if args.test_subset:
         print(f"Using subset of {args.test_subset} examples")
@@ -558,18 +607,21 @@ def main():
         tokenizer.model_max_length = max_seq_length
 
     # Set global seeds for reproducibility
+    _seed = args.seed if args.seed is not None else DEFAULT_SEED
     try:
-        random.seed(DEFAULT_SEED)
-        np.random.seed(DEFAULT_SEED)
-        torch.manual_seed(DEFAULT_SEED)
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
         if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(DEFAULT_SEED)
-        os.environ["PYTHONHASHSEED"] = str(DEFAULT_SEED)
+            torch.cuda.manual_seed_all(_seed)
+        os.environ["PYTHONHASHSEED"] = str(_seed)
     except Exception:
         pass
 
     # CoT phrase selection
     cot_phrase = args.cot_phrase if args.cot else None
+    if args.nocheat:
+        cot_phrase = "Do not cheat." if not cot_phrase else cot_phrase + "\n\nDo not cheat."
     if cot_phrase:
         print(f"Using CoT phrase: {cot_phrase}")
 
@@ -579,6 +631,7 @@ def main():
         max_seq_length=max_seq_length,
         tensor_parallel_size=args.parallel_size,
         distributed_executor_backend=args.distributed_backend,
+        seed=args.seed,
     )
     # Evaluate the model
     print('--' * 20)
@@ -589,6 +642,9 @@ def main():
         enable_thinking=args.enable_thinking,
         cot_phrase=cot_phrase,
         reasoning_effort=args.reasoning_effort,
+        positive_predicate=args.positive_predicate,
+        negative_predicate=args.negative_predicate,
+        temperature=args.temperature,
     )
     
     # add a single top-level metadata file to avoid per-item duplication
@@ -596,6 +652,10 @@ def main():
         "model": model_arg,
         "model_path": model_path,
         "tag": tag,
+        "dataset": args.dataset,
+        "dataset_config": args.dataset_config,
+        "positive_predicate": args.positive_predicate,
+        "negative_predicate": args.negative_predicate,
         "max_seq_length": max_seq_length,
         "max_new_tokens": max_new_tokens,
         "enable_thinking": args.enable_thinking,

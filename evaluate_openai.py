@@ -22,17 +22,50 @@ from tqdm import tqdm
 
 DEFAULT_MAX_COMPLETION_TOKENS = 16000
 
+# Marker for the final paragraph of an SLR-Bench prompt (the induction instruction).
+TASK_MARKER = "Your task is to formulate a hypothesis"
+
+# Capability-ceiling probe: replaces the induction instruction with an explicit
+# instruction to enumerate the positively-labelled examples as ground facts. This
+# measures whether the extensional shortcut is *reachable* for a weak model, not
+# whether the model takes it spontaneously.
+SHORTCUT_INSTRUCTION = """Your task is to extract the labels from the examples above.
+
+Go through the examples and find every train that is labelled as eastbound. Write each one out as a Prolog fact, one per line, inside a single code block. Copy the train identifiers exactly as they appear above.
+
+For example, if train0 and train3 were labelled eastbound, you would output:
+
+```
+eastbound(train0).
+eastbound(train3).
+```
+
+Include every eastbound train and no westbound trains. Output only the code block."""
+
+
+def transform_prompt(prompt: str, mode: str) -> str:
+    """Return the prompt rewritten for the requested probe mode."""
+    if mode == "default":
+        return prompt
+    idx = prompt.rfind(TASK_MARKER)
+    if idx < 0:
+        raise ValueError(f"Could not find task instruction marker in prompt: {prompt[-200:]!r}")
+    return prompt[:idx] + SHORTCUT_INSTRUCTION
+
 
 def call_model(client: OpenAI, model: str, prompt: str, reasoning_effort: str | None,
-               max_completion_tokens: int) -> tuple[str, int, int]:
+               max_completion_tokens: int, seed: int | None = None) -> tuple[str, int, int]:
     """Call the OpenAI Chat Completions API and return (text, prompt_tokens, completion_tokens)."""
     kwargs: dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "max_completion_tokens": max_completion_tokens,
     }
+    if max_completion_tokens > 0:  # 0 = no cap (the API then applies the model's own output limit)
+        kwargs["max_completion_tokens"] = max_completion_tokens
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
+    if seed is not None:
+        kwargs["seed"] = seed
 
     response = client.chat.completions.create(**kwargs)
     choice = response.choices[0]
@@ -47,7 +80,7 @@ def main():
     parser.add_argument("--reasoning-effort", default=None, choices=["low", "medium", "high", "none"],
                         help="Reasoning effort for o-series and GPT-5 models.")
     parser.add_argument("--max-completion-tokens", type=int, default=DEFAULT_MAX_COMPLETION_TOKENS,
-                        help=f"Max completion tokens per sample (default: {DEFAULT_MAX_COMPLETION_TOKENS})")
+                        help=f"Max completion tokens per sample (default: {DEFAULT_MAX_COMPLETION_TOKENS}; 0 = no cap)")
     parser.add_argument("--out-path", default="output/eval-openai",
                         help="Directory to store per-model result folders.")
     parser.add_argument("--workers", type=int, default=8,
@@ -56,6 +89,11 @@ def main():
                         help="Evaluate on a subset of N examples (for quick tests).")
     parser.add_argument("--rerun-truncated", action="store_true",
                         help="Re-run only samples that hit the token limit in an existing run.")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Optional seed passed to the API. Also appended to the output dir name.")
+    parser.add_argument("--prompt-mode", default="default", choices=["default", "shortcut"],
+                        help="'shortcut' replaces the induction instruction with an explicit "
+                             "instruction to enumerate the eastbound labels (capability-ceiling probe).")
     args = parser.parse_args()
 
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -67,6 +105,10 @@ def main():
     tag = args.model.split("/")[-1]
     if args.reasoning_effort:
         tag += f"-effort-{args.reasoning_effort}"
+    if args.seed is not None:
+        tag += f"-seed{args.seed}"
+    if args.prompt_mode != "default":
+        tag += f"-{args.prompt_mode}"
     out_dir = os.path.join(args.out_path, tag)
     outputs_path = os.path.join(out_dir, "model_outputs.json")
 
@@ -103,8 +145,8 @@ def main():
 
     def _run(example):
         text, pt, ct = call_model(
-            client, args.model, example["prompt"],
-            args.reasoning_effort, args.max_completion_tokens,
+            client, args.model, transform_prompt(example["prompt"], args.prompt_mode),
+            args.reasoning_effort, args.max_completion_tokens, args.seed,
         )
         return {
             "problem_id": example["id"],
@@ -147,9 +189,12 @@ def main():
             "tag": tag,
             "reasoning_effort": args.reasoning_effort,
             "max_completion_tokens": args.max_completion_tokens,
+            "seed": args.seed,
+            "prompt_mode": args.prompt_mode,
         }, f, indent=2)
 
-    exceeded = sum(1 for r in model_outputs if r["completion_tokens"] >= args.max_completion_tokens - 10)
+    exceeded = (sum(1 for r in model_outputs if r["completion_tokens"] >= args.max_completion_tokens - 10)
+                if args.max_completion_tokens > 0 else 0)  # no cap -> nothing can hit it
     print(f"Done. {exceeded}/{len(model_outputs)} outputs hit the token limit.")
     print(f"Saved to {outputs_path}")
 

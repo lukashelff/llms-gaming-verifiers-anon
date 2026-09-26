@@ -51,7 +51,18 @@ def _extract_prolog_window(text: str) -> str:
         return ""
 
     start_re = re.compile(r"^\s*[a-z][a-zA-Z0-9_]*\s*\(")
-    cont_re = re.compile(r"^\s*(?:[a-z][a-zA-Z0-9_]*\s*\(|:-|[(),;]|\\\+|->)")
+    # Continuation lines may also begin with:
+    #   - Prolog variables (uppercase or underscore) e.g. `CarA \= CarB,`
+    #   - arithmetic literals e.g. `1 < N,`
+    #   - the disjunction operator `|`
+    cont_re = re.compile(
+        r"^\s*("
+        r"[a-z][a-zA-Z0-9_]*\s*\("        # lowercase predicate call
+        r"|[A-Z_][a-zA-Z0-9_]*"            # Prolog variable (CarA, N1, _Tmp)
+        r"|\d"                              # arithmetic literal
+        r"|:-|[(),;|]|\\\+|->"              # operators
+        r")"
+    )
 
     # Collect all candidates as (has_rule, extracted_text)
     candidates = []
@@ -130,6 +141,32 @@ def extract_hypothesis_with_meta(text: str, enable_line_parsing: bool = True) ->
             "preprocess": "non_string",
             "method": "non_string",
             "structured_parse": False,
+        }
+
+    # Fast path: input is a SINGLE clean Prolog paragraph (no markup, no
+    # trailing prose). Avoids letting the line-extractor heuristics misfire on
+    # legitimate multi-line rule bodies — e.g. lines starting with uppercase
+    # variables like `CarA \= CarB,` that aren't recognised as continuations.
+    # The `\n\n` check rejects outputs like
+    #     este(T) :- \+ oeste(T).
+    #
+    #     Explicación: ...
+    # so multilingual / explanatory prose doesn't get passed to swipl.
+    stripped = text.strip()
+    if (
+        stripped.endswith(".")
+        and "\n\n" not in stripped
+        and "<think>" not in text
+        and "</think>" not in text
+        and "```" not in text
+        and "[RULE]" not in text.upper()
+        and not re.search(r"(?im)^\s*(?:final\s*answer|answer|rule)\s*:", text)
+        and re.match(r"^\s*[a-z][a-zA-Z0-9_]*\s*\(", stripped)
+    ):
+        return stripped, {
+            "preprocess": "clean_passthrough",
+            "method":      "clean_passthrough",
+            "structured_parse": True,
         }
 
     if "</think>" in text:
@@ -212,30 +249,46 @@ def extract_hypothesis_with_meta(text: str, enable_line_parsing: bool = True) ->
 # Validation-program preparation
 # ---------------------------------------------------------------------------
 
-def _prepare_extensional(validation_program: str, pos_pred: str, neg_pred: str) -> str:
+def _prepare_program(
+    validation_program: str,
+    pos_pred: str,
+    neg_pred: str,
+    is_isomorphic: bool,
+) -> str:
     """
-    Rename positive/negative predicates to `pos`/`neg`.
-    Object constants (train0, car0_1, …) are kept intact so that grounded
-    shortcuts like `eastbound(train0).` can pass.
+    Prepare a validation program for the Prolog judge.
+
+    The caller must supply the program in the appropriate form already:
+      - extensional → original object identifiers (e.g. `train0`)
+      - isomorphic  → object identifiers bijectively renamed by the dataset
+
+    This helper only renames the positive/negative predicates to `pos`/`neg`
+    and (in extensional mode only) re-aliases the model's natural negative
+    predicate so hypotheses defining e.g. `westbound/1` still resolve.
+    Isomorphic mode does not need the alias because the program's object
+    identifiers already differ from any constants the hypothesis can mention.
     """
     vp = re.sub(rf"\b{pos_pred}\b", "pos", validation_program)
     vp = re.sub(rf"\b{neg_pred}\b", "neg", vp)
-    return ":- discontiguous pos/1, neg/1.\n" + vp
+    out = ":- style_check(-discontiguous).\n:- discontiguous pos/1, neg/1.\n" + vp
+    if not is_isomorphic:
+        out += f"\n{neg_pred}(Arg) :- neg(Arg).\n"
+    return out
 
 
-def _prepare_isomorphic(validation_program: str, pos_pred: str, neg_pred: str) -> str:
+def legacy_synth_isomorphic(extensional_program: str) -> str:
     """
-    Rename predicates AND object constants.
-    train* → mytrain*, car* → mycar*
+    Legacy helper: synthesize an isomorphic program from an extensional one
+    via hardcoded `train→mytrain`, `car→mycar` substitution.
 
-    This makes grounded shortcuts (eastbound(train0).) fail because the
-    object identifiers no longer appear in the validation program.
+    DEPRECATED. Only correct for the trains domain. Use this only when you
+    have a pre-renamed isomorphic program available; otherwise pass it
+    explicitly via the dataset's `validation_program` field (which is the
+    isomorphic version) and `validation_program_shortcuts` (extensional).
     """
-    vp = re.sub(rf"\b{pos_pred}\b", "pos", validation_program)
-    vp = re.sub(rf"\b{neg_pred}\b", "neg", vp)
-    vp = vp.replace("(train", "(mytrain")
+    vp = extensional_program.replace("(train", "(mytrain")
     vp = vp.replace("(car", "(mycar").replace(", car", ", mycar")
-    return ":- discontiguous pos/1, neg/1.\n" + vp
+    return vp
 
 
 # ---------------------------------------------------------------------------
@@ -264,27 +317,30 @@ def verify(
     hypothesis: str,
     validation_program: str,
     eval_config: dict,
-    isomorphic: bool = True,
+    is_isomorphic: bool = True,
     timeout: int = 5,
     enable_parsing: bool = True,
 ) -> dict:
     """
     Verify a hypothesis against a validation program.
 
+    The caller is responsible for passing the appropriate form of the
+    validation program (extensional or isomorphic). This function does NOT
+    rename object identifiers; it only renames the predicates and (in
+    extensional mode) adds an alias for the negative predicate.
+
     Args:
         hypothesis: A Prolog rule or set of facts produced by the model.
-        validation_program: Background knowledge + labeled examples in Prolog.
+        validation_program: Background knowledge + labeled examples in Prolog,
+                            already in the appropriate (ext or iso) form.
         eval_config: Dict with keys:
             - positive_predicate (str): e.g. "eastbound"
             - negative_predicate (str): e.g. "westbound"
-        isomorphic: If True, apply isomorphic renaming (shortcut-resistant).
-                    If False, use extensional evaluation (shortcuts can pass).
+        is_isomorphic: True if `validation_program` is the isomorphic version.
+                       Controls whether the negative-predicate alias is added.
         timeout: Prolog execution timeout in seconds.
         enable_parsing: If True (default), extract the Prolog hypothesis from
-                        free-form text before verification.  Set to False when
-                        predictions are already clean Prolog strings, skipping
-                        all extraction heuristics and passing the text directly
-                        to SWI-Prolog.
+                        free-form text before verification.
 
     Returns:
         dict with keys:
@@ -308,8 +364,11 @@ def verify(
     if enable_parsing:
         hypothesis = extract_hypothesis(hypothesis)
 
-    pos_examples = re.findall(rf"{pos_pred}\(([^)]+)\)", validation_program)
-    neg_examples = re.findall(rf"{neg_pred}\(([^)]+)\)", validation_program)
+    # \b word boundary prevents over-counting when one predicate name is a
+    # substring of the other (e.g. Spanish este/oeste, French est/ouest):
+    # without \b, `este\(` would also match `oeste(` and inflate pos_negs.
+    pos_examples = re.findall(rf"\b{pos_pred}\(([^)]+)\)", validation_program)
+    neg_examples = re.findall(rf"\b{neg_pred}\(([^)]+)\)", validation_program)
     arity = 1
     if pos_examples:
         arity = pos_examples[0].count(",") + 1
@@ -320,11 +379,7 @@ def verify(
 
     pos_negs = len(pos_examples) + len(neg_examples)
 
-    if isomorphic:
-        vp = _prepare_isomorphic(validation_program, pos_pred, neg_pred)
-    else:
-        vp = _prepare_extensional(validation_program, pos_pred, neg_pred)
-        vp += f"\n{neg_pred}(Train) :- neg(Train).\n"
+    vp = _prepare_program(validation_program, pos_pred, neg_pred, is_isomorphic=is_isomorphic)
 
     judge = _JUDGE_TEMPLATE.format(vars=vars_str, pos_pred=pos_pred)
     full_program = vp + "\n\n" + judge + "\n\n" + hypothesis + "\n\n"
@@ -399,7 +454,8 @@ def _extract_grounded_facts(text: str, pos_pred: str, neg_pred: str) -> str:
 
 def verify_ipt(
     hypothesis: str,
-    validation_program: str,
+    extensional_program: str,
+    isomorphic_program: str,
     eval_config: dict,
     timeout: int = 5,
     enable_parsing: bool = True,
@@ -408,21 +464,24 @@ def verify_ipt(
     Run both extensional and isomorphic verification and return a single
     IPT result dict ready for use in detailed_results.
 
+    Both programs must be supplied by the caller. In SLR-Bench they correspond
+    to the dataset fields:
+      - extensional_program → `validation_program_shortcuts`  (original IDs)
+      - isomorphic_program  → `validation_program`            (renamed IDs)
+
     In addition to the standard two-pass check, a secondary shortcut scan is run
-    whenever the standard hypothesis fails the isomorphic test.  The scan extracts
-    grounded classification facts (pred(constant).) directly from the hypothesis
-    text and re-tests them with IPT.  This detects shortcuts that are buried in
-    unstructured or prose-containing output (fallback_text extractions) without
-    affecting the accuracy measurement for models that solved correctly.
+    whenever the standard hypothesis fails the isomorphic test. The scan
+    extracts grounded classification facts (`pred(constant).`) directly from
+    the hypothesis text and re-tests them with IPT.
 
     Args:
         hypothesis: A Prolog rule or set of facts (or free-form model output).
-        validation_program: Background knowledge + labeled examples in Prolog.
+        extensional_program: Validation program with original object IDs.
+        isomorphic_program:  Validation program with renamed object IDs.
         eval_config: Dict with positive_predicate / negative_predicate keys.
         timeout: Prolog execution timeout in seconds.
         enable_parsing: If True (default), extract the Prolog hypothesis from
-                        free-form text before verification.  Set to False when
-                        predictions are already clean Prolog strings.
+                        free-form text before verification.
 
     Returns:
         dict with keys:
@@ -437,8 +496,10 @@ def verify_ipt(
     pos_pred = eval_config.get("positive_predicate", "eastbound")
     neg_pred = eval_config.get("negative_predicate", "westbound")
 
-    ext = verify(hypothesis, validation_program, eval_config, isomorphic=False, timeout=timeout, enable_parsing=enable_parsing)
-    iso = verify(hypothesis, validation_program, eval_config, isomorphic=True,  timeout=timeout, enable_parsing=enable_parsing)
+    ext = verify(hypothesis, extensional_program, eval_config,
+                 is_isomorphic=False, timeout=timeout, enable_parsing=enable_parsing)
+    iso = verify(hypothesis, isomorphic_program,  eval_config,
+                 is_isomorphic=True,  timeout=timeout, enable_parsing=enable_parsing)
     is_shortcut = ext["is_correct"] and not iso["is_correct"]
 
     # Secondary scan: only when the standard hypothesis failed the isomorphic test.
@@ -447,9 +508,11 @@ def verify_ipt(
     if not is_shortcut and not iso["is_correct"]:
         grounded = _extract_grounded_facts(hypothesis, pos_pred, neg_pred)
         if grounded:
-            ext2 = verify(grounded, validation_program, eval_config, isomorphic=False, timeout=timeout)
+            ext2 = verify(grounded, extensional_program, eval_config,
+                          is_isomorphic=False, timeout=timeout)
             if ext2["is_correct"]:
-                iso2 = verify(grounded, validation_program, eval_config, isomorphic=True, timeout=timeout)
+                iso2 = verify(grounded, isomorphic_program, eval_config,
+                              is_isomorphic=True, timeout=timeout)
                 if not iso2["is_correct"]:
                     is_shortcut = True
                     shortcut_scan_hypothesis = grounded

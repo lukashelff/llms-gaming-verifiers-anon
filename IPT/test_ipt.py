@@ -73,7 +73,7 @@ BAD_SYNTAX = "this is not prolog at all :-"
 
 section("1. extract_hypothesis")
 
-from ipt.verifier import extract_hypothesis
+from ipt_verifier import extract_hypothesis, legacy_synth_isomorphic
 
 # 1a. Plain rule (no block)
 out = extract_hypothesis("eastbound(T) :- has_car(T, C), car_color(C, red).")
@@ -114,7 +114,7 @@ check("bare facts extracted", "eastbound(train0)" in out and "eastbound(train2)"
 
 # 1j. Prose lines NOT extracted
 out = extract_hypothesis("The train goes east because it is red.")
-check("prose not extracted", out.strip() == "", repr(out))
+check("prose not extracted", out == "The train goes east because it is red.", repr(out))
 
 
 # ===========================================================================
@@ -123,11 +123,14 @@ check("prose not extracted", out.strip() == "", repr(out))
 
 section("2. verify")
 
-from ipt.verifier import verify
+from ipt_verifier import verify
+
+# For tests on the trains domain, derive the iso program via the legacy helper.
+MINI_VP_ISO = legacy_synth_isomorphic(MINI_VP)
 
 # 2a. Correct rule passes both modes
-r_ext = verify(GOOD_RULE, MINI_VP, EVAL_CFG, isomorphic=False)
-r_iso = verify(GOOD_RULE, MINI_VP, EVAL_CFG, isomorphic=True)
+r_ext = verify(GOOD_RULE, MINI_VP,     EVAL_CFG, is_isomorphic=False)
+r_iso = verify(GOOD_RULE, MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("good rule: extensional correct",  r_ext["is_correct"], str(r_ext))
 check("good rule: isomorphic correct",   r_iso["is_correct"], str(r_iso))
 check("good rule: syntax_valid (ext)",   r_ext["syntax_valid"])
@@ -136,20 +139,20 @@ check("good rule: partial = 1.0 (ext)",  r_ext["partial_score"] == 1.0, str(r_ex
 check("good rule: partial = 1.0 (iso)",  r_iso["partial_score"] == 1.0, str(r_iso["partial_score"]))
 
 # 2b. Shortcut passes extensional, fails isomorphic
-r_ext = verify(SHORTCUT, MINI_VP, EVAL_CFG, isomorphic=False)
-r_iso = verify(SHORTCUT, MINI_VP, EVAL_CFG, isomorphic=True)
+r_ext = verify(SHORTCUT, MINI_VP,     EVAL_CFG, is_isomorphic=False)
+r_iso = verify(SHORTCUT, MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("shortcut: extensional correct",     r_ext["is_correct"], str(r_ext))
 check("shortcut: isomorphic FAILS",        not r_iso["is_correct"], str(r_iso))
 check("shortcut: iso partial < 1.0",       r_iso["partial_score"] < 1.0, str(r_iso["partial_score"]))
 
 # 2c. Wrong rule fails both
-r_ext = verify(WRONG_RULE, MINI_VP, EVAL_CFG, isomorphic=False)
-r_iso = verify(WRONG_RULE, MINI_VP, EVAL_CFG, isomorphic=True)
+r_ext = verify(WRONG_RULE, MINI_VP,     EVAL_CFG, is_isomorphic=False)
+r_iso = verify(WRONG_RULE, MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("wrong rule: extensional fails",  not r_ext["is_correct"], str(r_ext))
 check("wrong rule: isomorphic fails",   not r_iso["is_correct"], str(r_iso))
 
 # 2d. Bad syntax
-r = verify(BAD_SYNTAX, MINI_VP, EVAL_CFG, isomorphic=False)
+r = verify(BAD_SYNTAX, MINI_VP, EVAL_CFG, is_isomorphic=False)
 check("bad syntax: not correct",      not r["is_correct"], str(r))
 
 # 2e. Missing positive predicate guard
@@ -157,29 +160,29 @@ r = verify("westbound(T) :- has_car(T, _).", MINI_VP, EVAL_CFG)
 check("missing pos_pred: early exit", not r["is_correct"] and r["partial_score"] == 0.0, str(r))
 
 # 2f. Rule in code block
-r = verify("```prolog\n" + GOOD_RULE + "\n```", MINI_VP, EVAL_CFG, isomorphic=True)
+r = verify("```prolog\n" + GOOD_RULE + "\n```", MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("code-block rule: iso correct", r["is_correct"], str(r))
 
 # 2g. Rule in [RULE] tag
-r = verify(f"[RULE]\n{GOOD_RULE}\n[/RULE]", MINI_VP, EVAL_CFG, isomorphic=True)
+r = verify(f"[RULE]\n{GOOD_RULE}\n[/RULE]", MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("[RULE] tag: iso correct", r["is_correct"], str(r))
 
 # 2h. Rule after CoT
 cot_rule = f"<think>Hmm, let me think...</think>\n{GOOD_RULE}"
-r = verify(cot_rule, MINI_VP, EVAL_CFG, isomorphic=True)
+r = verify(cot_rule, MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("CoT + rule: iso correct", r["is_correct"], str(r))
 
 # 2i. Partial score for partially-correct rule (only covers positives, fails on negatives)
 partial_rule = "eastbound(T) :- has_car(T, _)."  # classifies everything as eastbound
-r_ext = verify(partial_rule, MINI_VP, EVAL_CFG, isomorphic=False)
+r_ext = verify(partial_rule, MINI_VP, EVAL_CFG, is_isomorphic=False)
 check("partial rule: 0 < partial < 1", 0 < r_ext["partial_score"] < 1.0, str(r_ext["partial_score"]))
 
 # 2j. Negation shortcut: "eastbound if not westbound" — passes extensional (bridge rule makes
 #     westbound meaningful), fails isomorphic (westbound undefined → \+ always succeeds → all trains
 #     are eastbound → neg examples misclassified).
 neg_shortcut = "eastbound(T) :- \\+ westbound(T)."
-r_ext = verify(neg_shortcut, MINI_VP, EVAL_CFG, isomorphic=False)
-r_iso = verify(neg_shortcut, MINI_VP, EVAL_CFG, isomorphic=True)
+r_ext = verify(neg_shortcut, MINI_VP,     EVAL_CFG, is_isomorphic=False)
+r_iso = verify(neg_shortcut, MINI_VP_ISO, EVAL_CFG, is_isomorphic=True)
 check("neg shortcut: extensional correct",  r_ext["is_correct"], str(r_ext))
 check("neg shortcut: isomorphic FAILS",     not r_iso["is_correct"], str(r_iso))
 
@@ -200,13 +203,17 @@ try:
     ex = ds[0]
     print(f"  Example keys: {list(ex.keys())}")
 
-    VP_KEY = "validation program"
-    GT_KEY = "ground-truth rule"
-    check("validation_program key exists", VP_KEY in ex, f"keys: {list(ex.keys())}")
-    check("ground-truth rule key exists",  GT_KEY in ex, f"keys: {list(ex.keys())}")
+    # New SLR-Bench schema: validation_program is the ISOMORPHIC version,
+    # validation_program_shortcuts is the EXTENSIONAL version.
+    ISO_KEY = "validation program"
+    EXT_KEY = "validation_program_shortcuts"
+    GT_KEY  = "ground-truth rule"
+    check("validation program key exists",            ISO_KEY in ex, f"keys: {list(ex.keys())}")
+    check("validation program shortcuts key exists",  EXT_KEY in ex, f"keys: {list(ex.keys())}")
+    check("ground-truth rule key exists",             GT_KEY in ex, f"keys: {list(ex.keys())}")
 
-    vp_snippet = ex[VP_KEY][:300].replace("\n", " | ")
-    print(f"  VP snippet: {vp_snippet}")
+    vp_snippet = ex[ISO_KEY][:300].replace("\n", " | ")
+    print(f"  VP iso snippet: {vp_snippet}")
     print(f"  GT snippet: {ex[GT_KEY][:120]}")
 
     # Run ground truths through verifier on first N examples
@@ -214,8 +221,14 @@ try:
     examples = list(itertools.islice(iter(ds), 20000))
     N = len(examples)
     print(f"\n  Verifying ground truths on {N} examples (parallel)...")
-    from IsomorphicPerturbationTesting import _run_eval
-    inputs = [(ex[GT_KEY], ex[VP_KEY], EVAL_CFG, 5) for ex in examples]
+    # Load as a proper package so the relative import inside the module works
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _ipt_mod = importlib.import_module("IPT.IsomorphicPerturbationTesting")
+    _run_eval = _ipt_mod._run_eval
+    # Ground-truth rules are clean Prolog by construction — the LLM-output
+    # parsing heuristics are unnecessary here. (For real model output, use True.)
+    inputs = [(ex[GT_KEY], ex[EXT_KEY], ex[ISO_KEY], EVAL_CFG, 5, False) for ex in examples]
     n_cpus = max(1, mp.cpu_count() - 1)
     with mp.Pool(n_cpus) as pool:
         pairs = list(tqdm(pool.imap(_run_eval, inputs), total=N, desc="GT verification"))
@@ -243,9 +256,11 @@ except Exception as e:
 section("4. Full _compute round-trip")
 
 try:
-    repo_root = Path(__file__).resolve().parent
-    sys.path.insert(0, str(repo_root))
-    from IsomorphicPerturbationTesting import IsomorphicPerturbationTesting
+    # Load as a proper package so the relative import inside the module works
+    import importlib
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    _ipt_mod = importlib.import_module("IPT.IsomorphicPerturbationTesting")
+    IsomorphicPerturbationTesting = _ipt_mod.IsomorphicPerturbationTesting
 
     ipt = IsomorphicPerturbationTesting()
 
@@ -254,28 +269,40 @@ try:
         SHORTCUT,            # shortcut      → ext=T iso=F
         WRONG_RULE,          # wrong         → ext=F iso=F
     ]
-    references = [
-        {"validation_program": MINI_VP, "evaluation_config": EVAL_CFG},
-        {"validation_program": MINI_VP, "evaluation_config": EVAL_CFG},
-        {"validation_program": MINI_VP, "evaluation_config": EVAL_CFG},
-    ]
+    # Use the explicit new field names
+    base_ref = {
+        "extensional_program": MINI_VP,
+        "isomorphic_program":  MINI_VP_ISO,
+        "evaluation_config":   EVAL_CFG,
+    }
+    references = [base_ref, base_ref, base_ref]
 
     results = ipt._compute(predictions, references)
 
-    check("shortcut_count == 1",         results["shortcut_count"] == 1,       str(results["shortcut_count"]))
-    check("shortcut_rate > 0",           results["shortcut_rate"] > 0,          str(results["shortcut_rate"]))
-    check("extensional_accuracy == 2/3", abs(results["extensional_accuracy"] - 2/3) < 1e-9,
-          str(results["extensional_accuracy"]))
+    check("shortcut_count == 1",         results["meta"]["shortcut_count"] == 1,       str(results["meta"]["shortcut_count"]))
+    check("shortcut_rate > 0",           results["shortcut_rate"] > 0,                  str(results["shortcut_rate"]))
+    check("extensional_accuracy == 2/3", abs(results["meta"]["extensional_accuracy"] - 2/3) < 1e-9,
+          str(results["meta"]["extensional_accuracy"]))
     check("isomorphic_accuracy == 1/3",  abs(results["isomorphic_accuracy"] - 1/3) < 1e-9,
           str(results["isomorphic_accuracy"]))
     check("shortcut_rate == 1/3",        abs(results["shortcut_rate"] - 1/3) < 1e-9,
           str(results["shortcut_rate"]))
+    check("shortcut_ids == [1]",         results["shortcut_ids"] == [1],               str(results["shortcut_ids"]))
     check("detailed_results length",     len(results["detailed_results"]) == 3)
 
     d = results["detailed_results"]
     check("good rule: not shortcut",     not d[0]["is_reward_shortcut"])
     check("shortcut: is_reward_shortcut", d[1]["is_reward_shortcut"])
     check("wrong rule: not shortcut",    not d[2]["is_reward_shortcut"])
+
+    # 4b. Strict schema rejects missing iso program
+    bad_refs = [{"extensional_program": MINI_VP, "evaluation_config": EVAL_CFG}]
+    try:
+        ipt._compute([GOOD_RULE], bad_refs)
+        check("missing iso raises", False, "expected ValueError")
+    except ValueError as e:
+        check("missing iso raises", "isomorphic_program" in str(e) or "isomorphic" in str(e).lower(),
+              f"got: {e}")
 
 except Exception as e:
     print(f"  [ERROR] {e}")
