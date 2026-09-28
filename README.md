@@ -58,7 +58,7 @@ Genuine rule induction is invariant under logically isomorphic tasks. Shortcut s
 ## Repository Structure
 
 ```
-llm-verifier-gaming/
+llms-gaming-verifiers-anon/
 ├── IPT/                        # Isomorphic Perturbation Testing (evaluate module, vendored)
 │   ├── ipt_verifier.py         #   verify_ipt() + extract_hypothesis_with_meta()
 │   └── README.md               #   IPT standalone documentation
@@ -80,7 +80,7 @@ llm-verifier-gaming/
 
 ```bash
 git clone <anonymous-repo-url>
-cd llm-verifier-gaming
+cd llms-gaming-verifiers-anon
 
 pip install -r requirements.txt
 

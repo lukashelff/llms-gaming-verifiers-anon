@@ -12,4 +12,3 @@ Each script reads the logged results (`output/` from the evaluation scripts, W&B
 | `fig6_training_instability.py` | Fig. 6 (appendix): trainer / rollout-engine log-probability divergence |
 | `tab1_aggregate_table.py` | Table 1 / appendix full-suite table from `shortcuts.py` outputs |
 | `tab4_shortcut_types.py` | Table 4 (appendix): shortcut counts by type |
-| `tab8_samestack_table.py` | Appendix same-stack OLMES table |

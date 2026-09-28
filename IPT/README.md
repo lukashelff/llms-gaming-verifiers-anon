@@ -187,12 +187,11 @@ results = ipt.compute(predictions=model_outputs, references=refs)
 ## Citation
 
 ```bibtex
-@inproceedings{anonymous2026llms,
-  title     = {{LLMs Gaming Verifiers: RLVR can Lead to Reward Hacking}},
-  author    = {Anonymous},
-  booktitle = {ICLR 2026 Workshop on Logical Reasoning of Large Language Models},
-  year      = {2026},
-  url       = {https://openreview.net/forum?id=4B3WfRNqe3}
+@misc{anonymous2026llms,
+  title  = {{LLMs Gaming Verifiers: RLVR can Lead to Reward Hacking}},
+  author = {Anonymous},
+  note   = {Under review},
+  year   = {2026}
 }
 ```
 
