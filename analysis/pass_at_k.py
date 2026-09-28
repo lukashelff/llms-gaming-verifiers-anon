@@ -67,6 +67,10 @@ def load_run(run_dir: Path, model_glob: str = "*") -> pd.DataFrame:
             raise FileNotFoundError(f"No detailed_results.csv found under {run_dir}")
 
     df = pd.read_csv(ipt_csv)
+    # Older runs numbered problems from 0; SLR-Bench ids (used by the current scripts) start at 1.
+    # Normalise so that runs are aligned on the same task before any per-problem comparison.
+    if "problem_id" in df.columns and df["problem_id"].min() == 0:
+        df["problem_id"] = df["problem_id"] + 1
     return df
 
 
