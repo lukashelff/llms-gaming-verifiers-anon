@@ -26,13 +26,16 @@ mkdir -p scripts/train/slr && cp /path/to/training/scripts/*.sh scripts/train/sl
 
 ## Launch scripts (`scripts/`)
 
+`isolated/` = SLR-Bench is the only RLVR task (Fig. 2a,b and the second seed in App. B); `multi_reward/` = SLR-Bench inside the full Olmo-3 reward mix (Fig. 2c,d, OlmoLogic, and the control).
+
 | Script | Run |
 |---|---|
-| `reward_hacking_scripts/SLR-NoIsoRL.sh` / `SLR-IsoRL.sh` | isolated SLR-Bench-only RLVR with the extensional / isomorphic verifier (Fig. 2a,b) |
-| `reward_hacking_scripts/SLR-NoIsoRL-with-format.sh` | isolated extensional run with the format reward |
-| `reward_hacking_scripts/Olmo3-SLR-NoIsoRL.sh` / `Olmo3-SLR-IsoRL.sh` | SLR-Bench inside the full Olmo-3 multi-reward mix (Fig. 2c,d) |
-| `olmologic/Olmo3-SLR-isoRL.sh` | the OlmoLogic run: Olmo-3 mix + isomorphic SLR-Bench reward, 2 epochs / 3,350 steps |
-| `optimization_pressure/olmo3-think-rl.sh` | the control: continued RLVR on the Olmo-3 mix without SLR-Bench |
-| `judge_setup.sh`, `ray_setup.sh`, `code_api_setup.sh` | LLM-judge, Ray, and code-execution services used by the multi-reward runs |
+| `isolated/extensional.sh` / `isolated/isomorphic.sh` | isolated SLR-Bench RLVR with the extensional / isomorphic verifier (Fig. 2a,b) |
+| `isolated/extensional_format_reward.sh` | isolated extensional run with the additional format reward |
+| `multi_reward/extensional.sh` / `multi_reward/isomorphic.sh` | SLR-Bench inside the Olmo-3 multi-reward mix with the extensional / isomorphic verifier (Fig. 2c,d) |
+| `multi_reward/extensional_format_reward.sh` | multi-reward extensional run with the additional format reward |
+| `multi_reward/olmologic.sh` | OlmoLogic-7B-Think: Olmo-3 mix + isomorphic SLR-Bench reward, 2 epochs / 3,350 steps (Fig. 3) |
+| `multi_reward/control_no_slr.sh` | Olmo-3.1-7B-Think, the control: continued RLVR on the Olmo-3 mix without SLR-Bench (Fig. 3) |
+| `judge_setup.sh`, `ray_setup.sh`, `code_api_setup.sh` | LLM-judge, Ray, and code-execution services sourced by the multi-reward runs |
 
 The scripts are SLURM/Apptainer launchers; cluster-specific paths are replaced by the environment variables `$OPEN_INSTRUCT_DIR`, `$WORKSPACE`, `$WANDB_ENTITY`, and a container image placeholder. Hyperparameters (Olmo-3 defaults; beta = 0.05 in the isolated setting), the SLR-to-Olmo-3 data ratio, and compute are listed in Appendix B of the paper.

@@ -3,7 +3,7 @@
 #   Task 0 = judge (code API + LLM judge vLLM)
 #   Task 1 = Ray head (gradient updates via grpo_fast.py)
 #   Tasks 2–7 = Ray workers (48 vLLM inference engines)
-#SBATCH --job-name=OlmoLogic-Olmo3-SLR-IsoRL
+#SBATCH --job-name=MultiReward-SLR-Isomorphic
 #SBATCH --partition=all
 #SBATCH --nodes=7
 #SBATCH --gpus-per-node=8
@@ -18,7 +18,7 @@
 #SBATCH --exclude=cn[02,10,35]
 
 # --- 1. Configuration ---
-JOB_NAME="OlmoLogic-Olmo3-SLR-IsoRL"
+JOB_NAME="MultiReward-SLR-Isomorphic"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
@@ -27,8 +27,6 @@ LLM_JUDGE_MODEL="Qwen/Qwen3-32B"
 LLM_JUDGE_PORT=8000
 LLM_JUDGE_NUM_ENGINES=8
 CODE_API_PORT=1234
-
-
 
 export HOME="$BASE_DIR"
 export JOB_NAME="$JOB_NAME"
@@ -123,7 +121,7 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --save_traces \
   --dataset_local_cache_dir /stage/.cache/open_instruct_dataset_cache \
   --kl_estimator 2 \
-  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 AIML-TUDA/SLR-Bench:v1-All 1.0 \
+  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 AIML-TUDA/SLR-Bench:v1-All 5.0 \
   --dataset_mixer_list_splits train \
   --dataset_mixer_eval_list allenai/Dolci-Think-RL-7B 8 AIML-TUDA/SLR-Bench:v1-All 4 \
   --dataset_mixer_eval_list_splits train \
@@ -148,6 +146,8 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --lr_scheduler_type constant \
   --apply_verifiable_reward true \
   --slr_reward isomorphic \
+  --slr_reward_function partial \
+  --slr_parsing simple \
   --llm_judge_model hosted_vllm/$LLM_JUDGE_MODEL \
   --llm_judge_timeout 1200 \
   --llm_judge_max_tokens 2048 \
