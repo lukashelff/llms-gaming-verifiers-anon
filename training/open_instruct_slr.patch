@@ -1,0 +1,2060 @@
+diff --git a/open_instruct/IFEvalG/instructions_util.py b/open_instruct/IFEvalG/instructions_util.py
+index b37f5321e..bb7831d03 100644
+--- a/open_instruct/IFEvalG/instructions_util.py
++++ b/open_instruct/IFEvalG/instructions_util.py
+@@ -14,13 +14,66 @@
+ 
+ """Utility library of instructions."""
+ 
++import contextlib
+ import functools
++import os
+ import random
+ import re
+ 
+ import immutabledict
+ import nltk
+ 
++from open_instruct import logger_utils
++
++logger = logger_utils.setup_logger(__name__)
++
++
++def _setup_nltk_data_path():
++    """Prepend NLTK_DATA and fallback dirs to nltk.data.path so workers find data."""
++    candidates = []
++    if os.environ.get("NLTK_DATA"):
++        candidates.append(os.environ["NLTK_DATA"])
++    # Fallbacks for container/Ray workers where NLTK_DATA may not be set
++    for fallback in ("/stage/.cache/nltk_data", os.path.join(os.getcwd(), ".cache", "nltk_data")):
++        if os.path.isdir(fallback) and fallback not in candidates:
++            candidates.append(fallback)
++    for path in candidates:
++        if path not in nltk.data.path:
++            nltk.data.path.insert(0, path)
++        if path == os.environ.get("NLTK_DATA"):
++            with contextlib.suppress(OSError):
++                os.makedirs(path, exist_ok=True)
++
++
++def _ensure_nltk_tokenizer_data():
++    """Ensure NLTK tokenizer data (punkt_tab, punkt) is available for word_tokenize/sent_tokenize."""
++    _setup_nltk_data_path()
++    download_dir = os.environ.get("NLTK_DATA") or (
++        "/stage/.cache/nltk_data" if os.path.isdir("/stage/.cache/nltk_data") else None
++    )
++    for resource in ("punkt_tab", "punkt"):
++        try:
++            if resource == "punkt_tab":
++                nltk.data.find(f"tokenizers/{resource}/english")
++            else:
++                nltk.data.find(f"tokenizers/{resource}/english.pickle")
++        except LookupError:
++            try:
++                kwargs = {"quiet": True}
++                if download_dir:
++                    kwargs["download_dir"] = download_dir
++                nltk.download(resource, **kwargs)
++            except Exception as e:
++                logger.warning(
++                    "NLTK download of %s failed: %s. Set NLTK_DATA to a writable dir and ensure network access.",
++                    resource,
++                    e,
++                )
++                raise
++
++
++_ensure_nltk_tokenizer_data()
++
+ WORD_LIST = [
+     "western",
+     "sentence",
+diff --git a/open_instruct/code_utils/api.py b/open_instruct/code_utils/api.py
+index 56333dcda..a6df91423 100644
+--- a/open_instruct/code_utils/api.py
++++ b/open_instruct/code_utils/api.py
+@@ -48,9 +48,9 @@ async def health_check() -> dict[str, str]:
+ 
+ 
+ @app.post("/test_program")
+-async def test_program(request: TestRequest) -> dict[str, list[int] | list[float]]:
++def test_program(request: TestRequest) -> dict[str, list[int] | list[float]]:
++    """Synchronous handler — FastAPI runs this in a thread-pool so the event loop is not blocked."""
+     try:
+-        # logger.info("Executing tests for program: %s", request.program)
+         decoded_tests = decode_tests(request.tests)
+         results, runtimes = get_successful_tests_fast(
+             program=request.program, tests=decoded_tests, max_execution_time=request.max_execution_time
+@@ -62,8 +62,8 @@ async def test_program(request: TestRequest) -> dict[str, list[int] | list[float
+ 
+ 
+ @app.post("/test_program_stdio")
+-async def test_program_stdio(request: TestRequest) -> dict[str, list[int] | list[float]]:
+-    # run tests with the stdio format
++def test_program_stdio(request: TestRequest) -> dict[str, list[int] | list[float]]:
++    """Synchronous handler — FastAPI runs this in a thread-pool so the event loop is not blocked."""
+     try:
+         decoded_tests = decode_tests(request.tests)
+         results, runtimes = get_successful_tests_stdio(
+diff --git a/open_instruct/code_utils/code_utils.py b/open_instruct/code_utils/code_utils.py
+index d24982f63..99fc18dbf 100644
+--- a/open_instruct/code_utils/code_utils.py
++++ b/open_instruct/code_utils/code_utils.py
+@@ -1,4 +1,6 @@
+ import base64
++import contextlib
++import io
+ import json
+ import math
+ import multiprocessing
+@@ -102,19 +104,20 @@ def run_tests_against_program_helper_2(func: str, tests: list[str], shared_resul
+         execution_context: dict[str, Any] = {}
+         execution_context.update({"__builtins__": __builtins__})
+ 
+-        try:
+-            exec(func, execution_context)
+-        except Exception:
+-            for i in range(len(tests)):
+-                shared_results[i] = 0
+-            return
+-
+-        for idx, test in enumerate(tests):
++        with contextlib.redirect_stdout(io.StringIO()):
+             try:
+-                exec(test, execution_context)
+-                shared_results[idx] = 1
++                exec(func, execution_context)
+             except Exception:
+-                shared_results[idx] = 0
++                for i in range(len(tests)):
++                    shared_results[i] = 0
++                return
++
++            for idx, test in enumerate(tests):
++                try:
++                    exec(test, execution_context)
++                    shared_results[idx] = 1
++                except Exception:
++                    shared_results[idx] = 0
+     finally:
+         # Restore in child process (though it will terminate anyway)
+         partial_undo_reliability_guard()
+@@ -128,16 +131,17 @@ def run_individual_test_helper(func: str, test: str, result_array, index: int, r
+     try:
+         execution_context = {}
+         execution_context.update({"__builtins__": __builtins__})
+-        try:
+-            exec(func, execution_context)
+-            start_time = time.time()
+-            exec(test, execution_context)
+-            end_time = time.time()
+-            result_array[index] = 1
+-            runtimes_array[index] = end_time - start_time
+-        except Exception:
+-            result_array[index] = 0
+-            runtimes_array[index] = -1.0
++        with contextlib.redirect_stdout(io.StringIO()):
++            try:
++                exec(func, execution_context)
++                start_time = time.time()
++                exec(test, execution_context)
++                end_time = time.time()
++                result_array[index] = 1
++                runtimes_array[index] = end_time - start_time
++            except Exception:
++                result_array[index] = 0
++                runtimes_array[index] = -1.0
+     finally:
+         # Restore in child process (though it will terminate anyway)
+         partial_undo_reliability_guard()
+diff --git a/open_instruct/context_window_checker.py b/open_instruct/context_window_checker.py
+index 47ab5ae2b..f490a3f88 100644
+--- a/open_instruct/context_window_checker.py
++++ b/open_instruct/context_window_checker.py
+@@ -89,7 +89,7 @@ def check_context_window_limit(
+     """
+     try:
+         # First try to load the actual model tokenizer from HuggingFace
+-        tokenizer = AutoTokenizer.from_pretrained(model_name.replace("hosted_vllm/", ""))
++        tokenizer = AutoTokenizer.from_pretrained(model_name.replace("hosted_vllm/", ""), local_files_only=True)
+         max_context_length = tokenizer.model_max_length if max_context_length is None else max_context_length
+ 
+         # Count tokens in all messages using HuggingFace tokenizer
+diff --git a/open_instruct/data_loader.py b/open_instruct/data_loader.py
+index fcf1567d1..42084c453 100644
+--- a/open_instruct/data_loader.py
++++ b/open_instruct/data_loader.py
+@@ -329,7 +329,9 @@ class StreamingDataLoaderConfig:
+     dataset_mixer_eval_list: list[str] = field(default_factory=list)
+     dataset_mixer_list_splits: list[str] = field(default_factory=lambda: ["train"])
+     dataset_mixer_eval_list_splits: list[str] = field(default_factory=lambda: ["test"])
+-    dataset_transform_fn: list[str] = field(default_factory=lambda: ["rlvr_tokenize_v1", "rlvr_max_length_filter_v1"])
++    dataset_transform_fn: list[str] = field(
++        default_factory=lambda: ["slr_bench_prepare_v1", "rlvr_tokenize_v1", "rlvr_max_length_filter_v1"]
++    )
+     dataset_cache_mode: Literal["hf", "local"] = "local"
+     dataset_local_cache_dir: str = "local_dataset_cache"
+     dataset_config_hash: str | None = None
+@@ -357,7 +359,7 @@ class StreamingDataLoaderConfig:
+     """How to combine per-turn rewards: 'last' (use last turn reward) or 'sum' (sum all rewards across turns)."""
+ 
+     # LLM judge verifier
+-    llm_judge_model: str = "azure/gpt-4o-mini-standard"
++    llm_judge_model: str = "openai/gpt-4o-mini"
+     llm_judge_max_tokens: int = 2048
+     llm_judge_max_context_length: int = 8192
+     llm_judge_temperature: float = 1.0
+@@ -374,10 +376,22 @@ class StreamingDataLoaderConfig:
+     # Max length verifier
+     max_length_verifier_max_length: int = 32768
+ 
++    # SLR-Bench verifier
++    slr_reward: Literal["isomorphic", "base"] = "isomorphic"
++    """Which SLR judge score to use for training reward: 'isomorphic' or 'base'."""
++    slr_parsing: Literal["code_block", "simple"] = "code_block"
++    """Parsing strategy for extracting Prolog rules: 'code_block' (tiered RULE tags + code blocks) or 'simple' (parse_simple cleanup)."""
++    slr_reward_function: Literal["scaled", "partial"] = "scaled"
++    """Reward function: 'scaled' (gated partial credit with simplicity bonus) or 'partial' (raw partial score)."""
++
+     # Non stop penalty
+     non_stop_penalty: bool = False
+     non_stop_penalty_value: float = 0.0
+ 
++    # Language consistency penalty
++    apply_language_consistency_penalty: bool = False
++    """Multiply reward by a [0,1] score that detects script contamination (CJK, etc.) and n-gram repetition."""
++
+     # Evolving rubric reward
+     apply_evolving_rubric_reward: bool = False
+     """Whether to generate and apply evolving rubrics for reward computation.
+@@ -679,6 +693,12 @@ def accumulate_inference_batches(
+         )
+ 
+         example = dataset[result.index]
++        assert example["index"] == result.index, (
++            f"Dataset index mismatch: dataset[{result.index}] has index column value "
++            f"{example['index']}. This usually means the dataset was shuffled without "
++            f"re-indexing. Fix by adding: dataset = dataset.remove_columns(['index'])"
++            f".add_column('index', list(range(len(dataset)))) after shuffle."
++        )
+         query = example[INPUT_IDS_PROMPT_KEY]
+         ground_truth = example[GROUND_TRUTHS_KEY]
+         dataset_name = example[VERIFIER_SOURCE_KEY]
+@@ -1059,12 +1079,16 @@ class DataPreparationActor:
+             if self.shutdown_requested:
+                 return
+ 
++            _last_wait_log = 0.0
+             while step - self._last_consumed_step > self.config.async_steps:
+                 if self.shutdown_requested:
+                     return
+-                logger.info(
+-                    f"[DataPreparationActor] Step {step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute."
+-                )
++                now = time.time()
++                if now - _last_wait_log >= 10.0:
++                    logger.info(
++                        f"[DataPreparationActor] Step {step}: waiting for step {self._last_consumed_step + self.config.async_steps} to be consumed. Consider increasing training compute."
++                    )
++                    _last_wait_log = now
+                 time.sleep(0.1)
+ 
+             logger.info(
+diff --git a/open_instruct/dataset_transformation.py b/open_instruct/dataset_transformation.py
+index 3a50286a8..db138e70d 100644
+--- a/open_instruct/dataset_transformation.py
++++ b/open_instruct/dataset_transformation.py
+@@ -55,7 +55,7 @@ from typing import Any, Literal
+ import numpy as np
+ import torch
+ import transformers
+-from datasets import Dataset, concatenate_datasets, load_dataset
++from datasets import Dataset, Value, concatenate_datasets, load_dataset
+ from huggingface_hub import ModelCard, revision_exists
+ from rich.console import Console
+ from rich.text import Text
+@@ -936,8 +936,8 @@ TOOLS_COLUMN_KEY = "tools"
+ ENV_CONFIG_KEY = "env_config"
+ 
+ # Cache version: increment this when transformation logic changes significantly
+-# to invalidate old caches. v3: Added per-sample env tool injection in rlvr_tokenize_v3.
+-DATASET_CACHE_VERSION = "v3"
++# to invalidate old caches. v2: Added per-sample tool filtering in rlvr_tokenize_v3.
++DATASET_CACHE_VERSION = "v9"
+ 
+ 
+ def validate_dataset_tools(dataset: Dataset, configured_tool_names: list[str], dataset_name: str = "dataset") -> None:
+@@ -1404,6 +1404,35 @@ def rlvr_tokenize_v2(
+     return row
+ 
+ 
++def slr_bench_prepare_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, **kwargs: Any) -> dict[str, Any]:
++    """
++    Convert AIML-TUDA/SLR-Bench raw columns to RLVR format (messages, ground_truth, dataset).
++
++    No-op for rows that already have "messages" (e.g. when mixing with other datasets).
++    """
++    if DEFAULT_SFT_MESSAGES_KEY in row:
++        return row
++    prompt = row.get("prompt")
++    validation_program = row.get("validation program") or row.get("validation_program")
++    if prompt is None or validation_program is None:
++        return row
++    # prompt += (
++    #     "\n\nWrap your final Prolog rule in [RULE]...[/RULE] tags. "
++    #     "Only the content inside these tags will be evaluated. "
++    #     "Example: [RULE] eastbound(T) :- has_car(T,C), short(C). [/RULE]"
++    # )
++    validation_program_dict = {
++        "validation_program": validation_program,
++        "evaluation_config": {"positive_predicate": "eastbound", "negative_predicate": "westbound"},
++    }
++    row[GROUND_TRUTHS_KEY] = json.dumps(validation_program_dict)
++    row[VERIFIER_SOURCE_KEY] = "slr_bench"
++    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
++    row[RAW_PROMPT_KEY] = prompt
++    row["id"] = str(row["id"]) + "_slr_bench"
++    return row
++
++
+ def _resolve_tools_for_sample(
+     row: dict[str, Any], tool_definitions: list[dict[str, Any]] | None, pass_tools: bool
+ ) -> list[dict[str, Any]] | None:
+@@ -1436,6 +1465,9 @@ def rlvr_tokenize_v3(
+     pass_tools_to_chat_template: bool = True,
+ ):
+     prompt = row.pop(sft_messages_key)
++    # Support datasets (e.g. Dolci-Think-RL-7B) where the column is a string instead of messages list.
++    if isinstance(prompt, str):
++        prompt = [{"role": "user", "content": prompt}] if prompt.strip() else []
+     assert len(prompt) > 0, "Empty prompt in dataset"
+     # if the prompt has multiple messages, make sure we don't end in an assistant message.
+     if len(prompt) > 1 and prompt[-1]["role"] == "assistant":
+@@ -1513,6 +1545,7 @@ TRANSFORM_FNS = {
+     "preference_filter_v1": (preference_filter_v1, "filter"),
+     "preference_tulu_tokenize_and_truncate_v1": (preference_tulu_tokenize_and_truncate_v1_2, "map"),
+     "preference_tulu_filter_v1": (preference_tulu_filter_v1, "filter"),
++    "slr_bench_prepare_v1": (slr_bench_prepare_v1, "map"),
+     "rlvr_tokenize_v1": (rlvr_tokenize_v3, "map"),
+     "rlvr_max_length_filter_v1": (rlvr_max_length_filter_v2, "filter"),
+ }
+@@ -1591,16 +1624,28 @@ class DatasetConfig:
+                 "parquet", data_files=self.dataset_name, split=self.dataset_split, num_proc=max_num_processes()
+             )
+         else:
++            # Support dataset name with config, e.g. "AIML-TUDA/SLR-Bench:v1-All"
++            name_for_load = self.dataset_name
++            hf_config = None
++            if ":" in name_for_load:
++                name_for_load, hf_config = name_for_load.split(":", 1)
+             # commit hash only works for hf datasets
+-            self.dataset_commit_hash = get_commit_hash(
+-                self.dataset_name, self.dataset_revision, "README.md", "dataset"
+-            )
+-            dataset = load_dataset(
+-                self.dataset_name,
+-                split=self.dataset_split,
+-                revision=self.dataset_revision,
+-                num_proc=max_num_processes(),
+-            )
++            self.dataset_commit_hash = get_commit_hash(name_for_load, self.dataset_revision, "README.md", "dataset")
++            if hf_config:
++                dataset = load_dataset(
++                    name_for_load,
++                    hf_config,
++                    split=self.dataset_split,
++                    revision=self.dataset_revision,
++                    num_proc=max_num_processes(),
++                )
++            else:
++                dataset = load_dataset(
++                    name_for_load,
++                    split=self.dataset_split,
++                    revision=self.dataset_revision,
++                    num_proc=max_num_processes(),
++                )
+         assert isinstance(dataset, Dataset), f"Expected Dataset, got {type(dataset)}"
+         self.dataset = dataset
+         if self.dataset_range is None:
+@@ -1701,7 +1746,22 @@ def get_dataset_v1(dc: DatasetConfig, tc: TokenizerConfig):
+             raise ValueError(f"Unknown transform function type: {fn_type}")
+ 
+     if len(dataset) == 0:
+-        raise ValueError("No examples left after transformation")
++        max_pl = None
++        for d in dc.transform_fn_args or []:
++            if isinstance(d, dict) and "max_prompt_token_length" in d:
++                max_pl = d["max_prompt_token_length"]
++                break
++        hint = f" Try increasing --max_prompt_token_length (current: {max_pl})." if max_pl is not None else ""
++        raise ValueError(
++            f"No examples left after transformation for dataset '{dc.dataset_name}' split '{dc.dataset_split}'."
++            f" All rows may be filtered out by length or the split may be empty.{hint}"
++        )
++
++    # set dataset column 'id' to Value("null")
++    if "id" in dataset.column_names:
++        dataset = dataset.cast_column("id", Value("string"))
++
++    # Cast int id to string so this dataset can be concatenated with others that use string id
+     return dataset
+ 
+ 
+diff --git a/open_instruct/ground_truth_utils.py b/open_instruct/ground_truth_utils.py
+index 70f3c277c..296b6d437 100644
+--- a/open_instruct/ground_truth_utils.py
++++ b/open_instruct/ground_truth_utils.py
+@@ -11,6 +11,7 @@ import copy
+ import dataclasses
+ import json
+ import logging
++import math
+ import os
+ import re
+ import string
+@@ -38,6 +39,7 @@ from open_instruct.math_utils import (
+ )
+ from open_instruct.rubrics import RUBRIC_SCORING_PROMPT
+ from open_instruct.rubrics.run_utils import extract_json_from_response, run_litellm_async
++from open_instruct.slr.parsing import parse_simple
+ from open_instruct.utils import extract_final_answer
+ 
+ logger = logger_utils.setup_logger(__name__)
+@@ -48,6 +50,12 @@ logging.getLogger("litellm").setLevel(logging.ERROR)
+ logging.getLogger("litellm.cost_calculator").setLevel(logging.CRITICAL)
+ logging.getLogger("litellm._client").setLevel(logging.CRITICAL)
+ logging.getLogger("cost_calculator").setLevel(logging.WARNING)
++# Optional: set LITELLM_DEBUG=1 to turn on litellm debug (e.g. to debug judge errors).
++# Warning: debug mode may log API keys; use only in safe environments.
++if os.environ.get("LITELLM_DEBUG", "").strip() in ("1", "true", "True", "yes"):
++    from litellm import _turn_on_debug
++
++    _turn_on_debug()
+ logging.getLogger("httpx").setLevel(logging.WARNING)
+ 
+ 
+@@ -94,11 +102,23 @@ class CodeVerifierConfig(VerifierConfig):
+     code_apply_perf_penalty: bool
+ 
+ 
++@dataclasses.dataclass
++class SLRBenchVerifierConfig(VerifierConfig):
++    """Config for SLR-Bench verifier. Always runs both isomorphic and base judges for tracking."""
++
++    slr_reward: str = "isomorphic"  # "base" | "isomorphic"
++    slr_parsing: str = "code_block"  # "code_block" | "simple"
++    slr_reward_function: str = "scaled"  # "scaled" | "partial"
++    """Which SLR judge score to use for training reward: 'isomorphic' or 'base'. Both always run and are tracked."""
++
++
+ @dataclasses.dataclass
+ class VerificationResult:
+     score: float
+     cost: float = 0.0
+     reasoning: str | None = None
++    extra_scores: dict[str, float] | None = None
++    """Optional dict of additional scores for tracking (not used for training reward)."""
+ 
+ 
+ @dataclasses.dataclass
+@@ -710,34 +730,55 @@ class LMJudgeVerifier(VerifierFunction):
+ 
+     def parse_completion(self, completion):
+         """
+-        Extract reasoning and score from an OpenAI API completion response.
+-
+-        Args:
+-            completion: The OpenAI API completion response object
++        Extract reasoning, score and parse status from an OpenAI API completion response.
+ 
+         Returns:
+-            tuple: (reasoning, score) extracted from the response
++            tuple: (reasoning, score, status, content_len) where status is one of
++                "ok" / "regex_saved" / "hard_fail" / "no_completion".
++                Callers can use status to drive retry logic; "hard_fail" is the
++                only status that warrants a retry.
+         """
+-        reasoning = ""
+-        score = 0.0
+-
+         if not completion:
+-            print("No completion received from the model.")
+-            return reasoning, score
++            logger.error(f"[LLM Judge {self.name}] No completion received from the model.")
++            return "", 0.0, "no_completion", 0
+ 
+         try:
+             # remove anything between <think> and </think> including the tags using regex
+             pattern = r"<think>\s*.*?\s*</think>\s*"
+             content = re.sub(pattern, "", completion.choices[0].message.content, flags=re.DOTALL)
+             content = content.replace("<answer>", "").replace("</answer>", "")
+-            reasoning, score = self.extractor(content)
++            try:
++                reasoning, score, status = self.extractor(content)
++                return reasoning, score, status, len(content)
++            except ValueError as e:
++                # Hard parse failure: neither JSON nor regex recovered a SCORE.
++                # The caller's retry loop will see status="hard_fail" and retry.
++                logger.warning(f"[LLM Judge {self.name}] Hard parse failure: {str(e)}")
++                return content, 0.0, "hard_fail", len(content)
+ 
+         except Exception as e:
+-            print(f"Error processing model response: {str(e)}")
++            logger.error(f"[LLM Judge {self.name}] Error processing model response: {str(e)}, defaulting to 0.0")
+             if hasattr(completion, "choices") and completion.choices is not None and len(completion.choices) > 0:
+-                print(f"Response content: {getattr(completion.choices[0].message, 'content', 'No content available')}")
+-
+-        return reasoning, score
++                logger.error(
++                    f"Response content: {getattr(completion.choices[0].message, 'content', 'No content available')}"
++                )
++            return "", 0.0, "hard_fail", 0
++
++    def _make_extra_scores(self, status: str, attempts_used: int, **_) -> dict[str, float]:
++        """Per-judge telemetry. Per-call values are emitted here; W&B reports the
++        per-step mean across all judge calls, which makes the *_rate keys fractions
++        in [0, 1] and *_avg_retries a 0-3 average.
++          - fail_rate:    fraction of calls that returned score 0 after all retries
++          - regex_rate:   fraction recovered by the regex fallback
++          - avg_retries:  mean retries used (0 = first attempt succeeded)
++        no_completion and context-exceeded both fold into fail_rate.
++        """
++        key = self.name.replace("general-", "")
++        return {
++            f"debug/judge_{key}_fail_rate":   1.0 if status in ("hard_fail", "no_completion") else 0.0,
++            f"debug/judge_{key}_regex_rate":  1.0 if status == "regex_saved" else 0.0,
++            f"debug/judge_{key}_avg_retries": float(attempts_used),
++        }
+ 
+     def get_cost(self, response, model: str):
+         """
+@@ -765,11 +806,15 @@ class LMJudgeVerifier(VerifierFunction):
+         final_answer = extract_final_answer(prediction)
+         prompt = self.prompt_template.format(input=query, output=final_answer, label=label)
+ 
+-        max_retries = 3  # for rate limits
++        # Bounded retry: covers network errors AND parse failures. The hard
++        # ceiling prevents an infinite loop on a sample that the judge can
++        # never grade. After all retries, we fall back to score 0.0 and emit
++        # telemetry (judge_*_hard_fail = 1.0) so failures are visible in W&B.
++        max_retries = 3
+         retry_delay = 1.0
+ 
++        last_error_str: str | None = None
+         for attempt in range(max_retries):
+-            # judges the quality of a response
+             try:
+                 messages = build_messages(prompt)
+ 
+@@ -778,7 +823,7 @@ class LMJudgeVerifier(VerifierFunction):
+                     messages=messages,
+                     max_completion_tokens=self.verifier_config.llm_judge_max_tokens,
+                     model_name=self.verifier_config.llm_judge_model,
+-                    max_context_length=self.verifier_config.llm_judge_max_context_length,  # Adjust based on your model
++                    max_context_length=self.verifier_config.llm_judge_max_context_length,
+                     safety_margin=150,
+                 ):
+                     # Try to truncate messages to fit
+@@ -799,29 +844,86 @@ class LMJudgeVerifier(VerifierFunction):
+                         safety_margin=150,
+                     ):
+                         logger.error("Cannot fit request within context window even after truncation.")
+-                        return VerificationResult(score=0.0, cost=0.0, reasoning="Error: Context window exceeded")
+-                # end of Faeze's context window check
+-                response = await acompletion(
+-                    model=self.verifier_config.llm_judge_model,
+-                    messages=messages,
+-                    temperature=self.verifier_config.llm_judge_temperature,
+-                    max_completion_tokens=self.verifier_config.llm_judge_max_tokens,
+-                    seed=self.verifier_config.seed,
+-                    timeout=self.verifier_config.llm_judge_timeout,
+-                )
+-                reasoning, score = self.parse_completion(response)
++                        return VerificationResult(
++                            score=0.0,
++                            cost=0.0,
++                            reasoning="Error: Context window exceeded",
++                            extra_scores=self._make_extra_scores(
++                                status="hard_fail", attempts_used=attempt, content_len=0
++                            ),
++                        )
++                # For hosted_vllm/ (self-hosted judge), pass api_base and api_key so litellm
++                # does not send "fake-api-key" (which some servers reject).
++                acompletion_kwargs: dict = {
++                    "model": self.verifier_config.llm_judge_model,
++                    "messages": messages,
++                    "temperature": self.verifier_config.llm_judge_temperature,
++                    "max_completion_tokens": self.verifier_config.llm_judge_max_tokens,
++                    "seed": self.verifier_config.seed,
++                    "timeout": self.verifier_config.llm_judge_timeout,
++                }
++                if self.verifier_config.llm_judge_model.lower().startswith("hosted_vllm/"):
++                    api_base = os.environ.get("HOSTED_VLLM_API_BASE")
++                    api_key = os.environ.get("HOSTED_VLLM_API_KEY")
++                    if api_base is not None:
++                        acompletion_kwargs["api_base"] = api_base
++                    if api_key is not None:
++                        acompletion_kwargs["api_key"] = api_key
++                    # Qwen3 with enable_thinking=False is calibrated for top_p=0.8 (per
++                    # the Qwen3 model card). Without this, vLLM falls back to Qwen3's
++                    # HF generation_config defaults (top_p=0.95, top_k=20), which are
++                    # the thinking-mode values and produce degenerate output ~1% of the
++                    # time (truncated `{`, repetition loops). See run 118759 for impact.
++                    acompletion_kwargs["top_p"] = 0.8
++                    acompletion_kwargs["extra_body"] = {
++                        "chat_template_kwargs": {"enable_thinking": False},
++                        "top_k": 20,
++                        "min_p": 0.0,
++                    }
++                    # NOTE: We intentionally do NOT set response_format=json_object here.
++                    # Grammar-constrained JSON decoding in vLLM causes two failure modes:
++                    # 1. When the policy output contains special chars (", \, etc.), the constraint
++                    #    forces the judge to escape every character inside the REASONING string,
++                    #    exhausting the max_tokens budget before "SCORE" is ever written.
++                    # 2. Fighting the grammar constraint against natural generation causes
++                    #    repetitive/degenerate REASONING text.
++                    # Instead, extract_json_score_with_fallback uses a robust regex to find
++                    # the SCORE even in malformed JSON output.
++                response = await acompletion(**acompletion_kwargs)
++                reasoning, score, status, content_len = self.parse_completion(response)
+                 cost = self.get_cost(response, self.verifier_config.llm_judge_model)
+-                # normalize score to be between 0 and 1
+-                return VerificationResult(score=score, cost=cost, reasoning=reasoning)
++
++                if status == "hard_fail" and attempt < max_retries - 1:
++                    # Retry: a fresh sample from the judge is often parseable
++                    # even when the previous one wasn't (high-temperature noise).
++                    await asyncio.sleep(retry_delay * (2**attempt))
++                    continue
++
++                return VerificationResult(
++                    score=score,
++                    cost=cost,
++                    reasoning=reasoning,
++                    extra_scores=self._make_extra_scores(
++                        status=status, attempts_used=attempt, content_len=content_len, raw_score=score
++                    ),
++                )
+ 
+             except Exception as e:
+-                logger.warning(f"LLM judge attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+-                if attempt == max_retries - 1:
+-                    logger.error(f"LLM judge failed after {max_retries} attempts. Returning default score of 0.0")
+-                    return VerificationResult(score=0.0, cost=0.0, reasoning=f"Error: {str(e)}")
+-                else:
+-                    await asyncio.sleep(retry_delay * (2**attempt))  # Exponential backoff
+-        return VerificationResult(score=0.0, cost=0.0, reasoning="Unknown error after all retries.")
++                last_error_str = str(e)
++                logger.warning(f"LLM judge attempt {attempt + 1}/{max_retries} failed: {last_error_str}")
++                if attempt < max_retries - 1:
++                    await asyncio.sleep(retry_delay * (2**attempt))
++
++        # All retries exhausted (either network errors or hard parse failures).
++        logger.error(f"LLM judge {self.name} failed after {max_retries} attempts. Defaulting to 0.0.")
++        return VerificationResult(
++            score=0.0,
++            cost=0.0,
++            reasoning=f"Error: {last_error_str or 'hard parse failure after retries'}",
++            extra_scores=self._make_extra_scores(
++                status="hard_fail", attempts_used=max_retries, content_len=0
++            ),
++        )
+ 
+     def __call__(
+         self,
+@@ -1190,6 +1292,308 @@ class RubricVerifier(VerifierFunction):
+         return RubricVerifierConfig
+ 
+ 
++class SLRBenchVerifier(VerifierFunction):
++    """
++    Verifier for SLR-Bench (Scalable Logical Reasoning) tasks.
++
++    Uses the Hugging Face evaluate metric AIML-TUDA/VerifiableRewardsForScalableLogicalReasoning
++    to check if the model's predicted Prolog rule is correct against the validation program.
++    Requires the `evaluate` library and SWI-Prolog installed on the system.
++
++    Label format: dict with "validation_program" (str) and "evaluation_config" (dict with
++    "positive_predicate" and "negative_predicate", e.g. "eastbound" / "westbound").
++    """
++
++    def __init__(self, verifier_config: SLRBenchVerifierConfig) -> None:
++        super().__init__("slr_bench", verifier_config=verifier_config, weight=1.0)
++        from open_instruct.slr.slr_verifier import evaluate_prediction  # noqa: PLC0415
++
++        self._evaluate_prediction = evaluate_prediction
++        logger.info(
++            "SLRBenchVerifier: slr_reward='%s', slr_parsing='%s', slr_reward_function='%s'.",
++            verifier_config.slr_reward,
++            verifier_config.slr_parsing,
++            verifier_config.slr_reward_function,
++        )
++
++    # Regex to extract content between [RULE] and [/RULE] tags (case-insensitive, dotall)
++    _RULE_TAG_PATTERN = re.compile(r"\[RULE\]\s*(.*?)\s*\[/RULE\]", re.IGNORECASE | re.DOTALL)
++    # Fallback: prolog-labelled code block, then any fenced code block
++    _PROLOG_BLOCK_PATTERN = re.compile(r"```prolog\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
++    _CODE_BLOCK_PATTERN = re.compile(r"```(?:[a-zA-Z0-9]*\n)?(.*?)```", re.DOTALL)
++
++    def _extract_prolog_rule(self, prediction: str) -> tuple[str, bool] | tuple[None, bool]:
++        """Extract the Prolog rule from model output.
++
++        After stripping the thinking section, applies one of two extraction modes
++        controlled by ``self.verifier_config.slr_parsing``:
++
++        ``'simple'``
++            Runs ``parse_simple`` to strip surrounding prose, then returns the
++            cleaned text with ``format_ok=False``.
++
++        ``'code_block'`` (default)
++            Uses a tiered extraction strategy:
++
++            1. ``[RULE]...[/RULE]`` tags  → (content, True)   format compliant
++            2. ````prolog...```` block    → (content, False)  code-block fallback
++            3. Any fenced code block      → (content, False)  code-block fallback
++            4. Nothing found              → (None, False)     prevents degenerate
++               outputs from being accidentally rewarded.
++
++        Returns a tuple ``(rule_text, format_ok)`` where ``format_ok`` is
++        ``True`` only when ``'code_block'`` mode finds ``[RULE]`` tags.
++        """
++        parsing = self.verifier_config.slr_parsing
++        if parsing not in ["code_block", "simple"]:
++            raise ValueError(f"Invalid slr_parsing='{parsing}'. Must be 'code_block' or 'simple'.")
++
++        cleaned = remove_thinking_section(prediction)
++        if not cleaned.strip():
++            return None, False
++
++        if parsing == "simple":
++            # Extracts all prolog code from the model answer
++            cleaned = parse_simple(cleaned)  # additional cleaning to remove irrelevant text
++            return cleaned, False
++        elif parsing == "code_block":
++            # First try to find explicit [RULE] tags, which is the preferred format.  If not found, fall back to code block extraction.
++
++            # Tier 1: explicit [RULE] tags
++            match = SLRBenchVerifier._RULE_TAG_PATTERN.search(cleaned)
++            if match:
++                rule_text = match.groups()[-1].strip()
++                if rule_text:
++                    return rule_text, True
++
++            # Tier 2: ```prolog ... ``` code block
++            match = SLRBenchVerifier._PROLOG_BLOCK_PATTERN.search(cleaned)
++            if match:
++                rule_text = match.groups()[-1].strip()
++                if rule_text:
++                    return rule_text, True
++
++            # Tier 3: any fenced code block
++            match = SLRBenchVerifier._CODE_BLOCK_PATTERN.search(cleaned)
++            if match:
++                rule_text = match.groups()[-1].strip()
++                if rule_text:
++                    return rule_text, True
++
++        return cleaned, False
++
++    @staticmethod
++    def get_rule_simplicity_bonus(model_response: str) -> float:
++        """
++        Compute a gentle rule simplicity bonus in [0,1].
++
++        This version is tuned for domains where correct rules are naturally
++        long and complex. It avoids over-penalizing necessary complexity and
++        mainly discourages excessive verbosity or pathological outputs.
++        """
++
++        if not model_response or not model_response.strip():
++            return 0.0
++
++        text = model_response.strip()
++
++        # Extract rule-like statements using regex
++        # Matches patterns like:
++        # ancestor(X,Y) :- parent(X,Z), ancestor(Z,Y).
++        rule_pattern = r"[a-zA-Z_][a-zA-Z0-9_]*\s*\([^)]*\)\s*(?::-\s*[^.]+)?\."
++        rules = re.findall(rule_pattern, text)
++
++        # If no formal rules found, return neutral bonus
++        if not rules:
++            return 0.8  # neutral-safe default
++
++        num_rules = len(rules)
++        total_literals = 0
++        total_length = sum(len(r) for r in rules)
++
++        for rule in rules:
++            if ":-" in rule:
++                _, body = rule.split(":-", 1)
++                literals = [lit.strip() for lit in body.split(",") if lit.strip()]
++                total_literals += len(literals)
++            else:
++                total_literals += 1
++
++        # Gentle penalties suitable for complex ILP domains
++        literal_score = math.exp(-0.035 * max(0, total_literals - 6))
++        rule_count_score = math.exp(-0.08 * max(0, num_rules - 2))
++        length_score = math.exp(-0.001 * max(0, total_length - 120))
++
++        simplicity = 0.6 * literal_score + 0.25 * rule_count_score + 0.15 * length_score
++
++        return max(0.0, min(1.0, simplicity))
++
++    def compute_reward(
++        self,
++        accuracy: float,
++        partial_score: float,
++        syntax_score: float,
++        rule_simplicity_bonus: float,
++        k: int = 4,
++        partial_gate: float = 0.5,
++    ) -> float:
++        """Compute reward in [0, 1] for ILP rule induction.
++
++        Design principles (GRPO best practice):
++        - **Correctness-only base**: reward comes exclusively from accuracy
++          and partial score. No free points for syntax or simplicity alone,
++          which previously created a ~1.1 floor that incentivised garbage.
++        - **Partial credit with soft gate**: ``partial_score`` is raised to
++          the power *k* (default 1) so only rules covering most examples get
++          meaningful partial credit.  Below *partial_gate* the reward is 0.
++        - **Simplicity as a multiplicative modifier** (not additive): a small
++          bonus/penalty that scales the correctness reward.  A perfect rule
++          with a concise body scores slightly higher than the same rule with
++          unnecessary literals, but a wrong rule with pretty formatting still
++          scores 0.
++        - ``syntax_score`` is intentionally **unused** for training reward.
++          If a rule ran in Prolog and got partial > 0 it is syntactically
++          valid by definition; giving extra reward for "parses but is wrong"
++          is pure reward-hacking fuel.  The value is still accepted as an
++          argument for backward compatibility and tracked in extra_scores.
++
++        Returns:
++            float: reward in [0, 1].
++        """
++        if self.verifier_config.slr_reward_function == "partial":
++            return partial_score
++
++        if accuracy == 1.0:
++            # Full marks.  Apply a small simplicity modifier [0.95, 1.0]
++            # so that among equally correct rules, shorter ones are preferred.
++            return 0.95 + 0.05 * rule_simplicity_bonus
++
++        # Partial credit: only when the rule covers a meaningful fraction.
++        if partial_score < partial_gate:
++            return 0.0
++
++        # partial_score**k compresses the range: 0.5→0.016, 0.8→0.26, 0.95→0.74
++        # Scale into [0, 0.9] so partial is always strictly below full accuracy.
++        base = partial_score**k
++        # Multiplicative simplicity modifier: scales base by [0.9, 1.0]
++        simplicity_mod = 0.9 + 0.1 * rule_simplicity_bonus
++        return min(0.9, base * simplicity_mod)
++
++    def __call__(
++        self,
++        tokenized_prediction: list[int],
++        prediction: str,
++        label: str | dict,
++        query: str | None = None,
++        rollout_state: dict | None = None,
++    ) -> VerificationResult:
++        """
++        Run BOTH isomorphic and base judges, return the selected one as the training score,
++        and track both in extra_scores for wandb logging.
++        """
++        if not prediction:
++            return VerificationResult(
++                score=0.0,
++                extra_scores={
++                    "slr_bench_isomorphic": 0.0,
++                    "slr_bench_base": 0.0,
++                    "slr_bench_format": 0.0,
++                    "slr_reward_hacking": 0.0,
++                },
++            )
++        ref = label
++        if isinstance(ref, str):
++            try:
++                ref = json.loads(ref)
++            except json.JSONDecodeError:
++                ref = ref
++        if not isinstance(ref, dict) or "validation_program" not in ref or "evaluation_config" not in ref:
++            logger.warning(
++                "SLRBenchVerifier expected label to be a dict with 'validation_program' and 'evaluation_config'. Got type=%s. with value %s",
++                type(ref).__name__,
++                ref,
++            )
++            return VerificationResult(
++                score=0.0,
++                extra_scores={
++                    "slr_bench_isomorphic": 0.0,
++                    "slr_bench_base": 0.0,
++                    "slr_bench_format": 0.0,
++                    "slr_reward_hacking": 0.0,
++                },
++            )
++
++        rule, format_ok = self._extract_prolog_rule(prediction)
++
++        # If no structured content was found (no tags, no code blocks), return 0.0.
++        # This prevents degenerate / garbage outputs from being rewarded.
++        if rule is None:
++            return VerificationResult(
++                score=0.0,
++                extra_scores={
++                    "slr_bench_isomorphic": 0.0,
++                    "slr_bench_base": 0.0,
++                    "slr_bench_format": 0.0,
++                    "slr_reward_hacking": 0.0,
++                },
++            )
++
++        rule_simplicity_bonus = self.get_rule_simplicity_bonus(rule)
++
++        validation_program = ref["validation_program"]
++        eval_config = ref.get(
++            "evaluation_config", {"positive_predicate": "eastbound", "negative_predicate": "westbound"}
++        )
++
++        # judge_scores: dict[str, float] = {}
++        scores: dict[str, float] = {}
++        scores["slr_bench_format"] = 1.0 if format_ok else 0.0  # 1.0 = [RULE] tags used
++        for judge_name in ["isomorphic", "base"]:
++            try:
++                result = self._evaluate_prediction(
++                    rule, validation_program, eval_config, timeout=5, isomorphic=(judge_name == "isomorphic")
++                )
++            except Exception as e:
++                logger.warning("[SLRBenchVerifier] %s metric failed: %s", judge_name, e, exc_info=True)
++                scores[f"slr_bench_{judge_name}"] = 0.0
++                continue
++            if result is None:
++                logger.warning("[SLRBenchVerifier] %s: evaluate_prediction returned None.", judge_name)
++                scores[f"slr_bench_{judge_name}"] = 0.0
++                continue
++            try:
++                accuracy = 1.0 if result["is_correct"] else 0.0
++                partial_score = result["partial_score"]
++                syntax_score = 1.0 if result["syntax_valid"] else 0.0
++                scores[f"slr_bench_{judge_name}"] = self.compute_reward(
++                    accuracy, partial_score, syntax_score, rule_simplicity_bonus
++                )
++                if judge_name == "isomorphic":
++                    scores["slr_bench_solved"] = 1.0 if accuracy == 1.0 else 0.0
++
++            except (TypeError, ValueError, KeyError) as e:
++                logger.warning("[SLRBenchVerifier] %s could not read score from result %s: %s", judge_name, result, e)
++                scores[f"slr_bench_{judge_name}"] = 0.0
++
++        scores["slr_reward_hacking"] = scores["slr_bench_base"] - scores["slr_bench_isomorphic"]
++
++        reward_model = self.verifier_config.slr_reward.lower()
++        if reward_model not in ["isomorphic", "base"]:
++            logger.error(
++                "[SLRBenchVerifier] Invalid slr_reward value '%s' in SLRBenchVerifierConfig. "
++                "Must be 'isomorphic' or 'base'. Reverting to 'isomorphic'.",
++                reward_model,
++            )
++            reward_model = "isomorphic"
++        selected_score = scores.get(f"slr_bench_{reward_model}", 0.0)
++
++        return VerificationResult(score=selected_score, extra_scores=scores)
++
++    @classmethod
++    def get_config_class(cls) -> type:
++        return SLRBenchVerifierConfig
++
++
+ def build_all_verifiers(args, streaming_config=None) -> dict[str, VerifierFunction]:
+     """
+     Build all verifiers with the given configs.
+@@ -1214,6 +1618,11 @@ def build_all_verifiers(args, streaming_config=None) -> dict[str, VerifierFuncti
+             instance.name = "code_stdio"
+             verifiers["code_stdio"] = instance
+ 
++        if subclass == SLRBenchVerifier:
++            instance = SLRBenchVerifier(verifier_config)
++            instance.name = "slr_bench"
++            verifiers["slr_bench"] = instance
++
+     for judge_type in JUDGE_PROMPT_MAP:
+         instance = LMJudgeVerifier(judge_type, LMJudgeVerifierConfig.from_args(args, streaming_config))
+         verifiers[instance.name.lower()] = instance
+@@ -1242,6 +1651,115 @@ def soft_format_reward_func(responses: list[str], reward_scale: float = 1.0) ->
+     return [reward_scale if match else 0.0 for match in matches]
+ 
+ 
++# Pre-compiled regexes for language_consistency_score (module-level for speed).
++_LC_NON_LATIN_RE = re.compile(
++    r"[^\x20-\x7E"  # ASCII printable
++    r"\u00A0-\u024F"  # Latin-1 Supplement + Extended A/B
++    r"\u0370-\u03FF"  # Greek (math symbols)
++    r"\u2000-\u206F"  # General Punctuation
++    r"\u2190-\u27FF"  # Arrows, Math Operators
++    r"\uFE00-\uFE0F"  # Variation selectors
++    r"\n\t]"
++)
++_LC_CJK_RE = re.compile(
++    r"[\u3000-\u9FFF"  # CJK Unified, Katakana, Hiragana, CJK symbols
++    r"\uFF00-\uFFEF"  # Fullwidth Forms (：, ，, etc.)
++    r"\u0400-\u04FF"  # Cyrillic
++    r"\u0600-\u06FF"  # Arabic
++    r"]"
++)
++_LC_COLON_STREAM_RE = re.compile(r"[:\uFF1A\n]{3,}")
++
++
++def language_consistency_score(text: str, ngram_size: int = 4, repetition_cap: float = 0.88) -> float:
++    """Score how linguistically consistent a response is, in [0, 1].
++
++    Detects three common RLVR degeneration modes:
++
++    1. **Script contamination** — CJK, Arabic, or Cyrillic characters appearing
++       in what should be English + Prolog output.  Even a small fraction (>0.5%)
++       of strong-signal scripts (CJK/Cyrillic/Arabic) triggers a penalty, while
++       other non-Latin chars use a broader 3% threshold.
++    2. **Token repetition** — long runs of repeated n-grams that inflate token
++       count without content.  The cap is set to 0.88 (not 0.80) because
++       Prolog/ILP reasoning naturally repeats predicate names (``has_car``,
++       ``has_wall``, etc.).
++    3. **Colon/newline streams** — degenerate outputs often contain long runs of
++       colons (``:``, ``：``) and bare newlines with no content.
++
++    All three sub-scores are multiplied so *any* failure mode drags the overall
++    score toward 0.
++
++    Args:
++        text: The full decoded model response (including thinking section).
++        ngram_size: Size of character n-grams for repetition detection.
++        repetition_cap: Fraction of repeated n-grams above which the score
++            starts dropping.  0.88 accommodates the natural repetition of
++            Prolog predicate names in long chain-of-thought outputs.
++
++    Returns:
++        float in [0, 1].  1.0 = clean, 0.0 = fully degenerate.
++    """
++    if not text or len(text.strip()) < 20:
++        return 1.0  # too short to judge — don't penalise
++
++    n_chars = len(text)
++
++    # --- 1. Script consistency ------------------------------------------------
++    # CJK / Cyrillic / Arabic should *never* appear in Prolog reasoning.  Use a
++    # very tight threshold (0.5%) for these strong-signal scripts.
++    n_cjk = len(_LC_CJK_RE.findall(text))
++    cjk_ratio = n_cjk / max(n_chars, 1)
++    if cjk_ratio > 0.005:
++        # Drop linearly from 1.0 at 0.5% to 0.0 at 5%.
++        script_score = max(0.0, 1.0 - (cjk_ratio - 0.005) / 0.045)
++    else:
++        # Broader non-Latin check (emoji, symbols, etc.) — more generous.
++        n_foreign = len(_LC_NON_LATIN_RE.findall(text))
++        foreign_ratio = n_foreign / max(n_chars, 1)
++        script_score = 1.0 if foreign_ratio <= 0.03 else max(0.0, 1.0 - (foreign_ratio - 0.03) / 0.20)
++
++    # --- 2. N-gram repetition ------------------------------------------------
++    chars = text.replace("\n", " ").replace("\t", " ")
++    if len(chars) < ngram_size + 10:
++        rep_score = 1.0
++    else:
++        ngrams: list[str] = [chars[i : i + ngram_size] for i in range(len(chars) - ngram_size + 1)]
++        total = len(ngrams)
++        unique = len(set(ngrams))
++        repetition_ratio = 1.0 - (unique / total)
++        if repetition_ratio <= repetition_cap:
++            rep_score = 1.0
++        else:
++            rep_score = max(0.0, 1.0 - (repetition_ratio - repetition_cap) / (1.0 - repetition_cap))
++
++    # --- 3. Colon/newline stream detector ------------------------------------
++    colon_noise = len(_LC_COLON_STREAM_RE.findall(text))
++    colon_ratio = colon_noise / max(n_chars, 1)
++    colon_score = 1.0 if colon_ratio < 0.01 else max(0.0, 1.0 - (colon_ratio - 0.01) / 0.05)
++
++    return script_score * rep_score * colon_score
++
++
++def language_consistency_penalty(
++    responses: list[str], penalty_scale: float = 1.0, ngram_size: int = 4, repetition_cap: float = 0.88
++) -> list[float]:
++    """Compute per-response language consistency scores for a batch.
++
++    Returns a list of floats in [0, 1] (one per response).
++    Use as a multiplicative modifier: ``final_reward = base_reward * lc_score``.
++
++    Args:
++        responses: List of decoded model responses.
++        penalty_scale: Not used as additive; kept for API symmetry.  The
++            returned scores are always in [0, 1] — the caller decides how
++            to apply them.
++        ngram_size: Passed to ``language_consistency_score``.
++        repetition_cap: Passed to ``language_consistency_score``.
++    """
++    return [language_consistency_score(r, ngram_size=ngram_size, repetition_cap=repetition_cap) for r in responses]
++
++
+ async def cleanup_all_llm_judge_clients():
+     """
+     Cleanup function to properly close all LLM judge clients before shutdown.
+@@ -1298,6 +1816,7 @@ async def apply_verifiable_reward(
+ 
+     response_rewards = [0] * len(responses)
+     response_per_func_rewards = [{} for _ in range(len(responses))]
++    response_extra_scores = [{} for _ in range(len(responses))]
+ 
+     for result, metadata in zip(reward_results, task_metadata):
+         response_idx = metadata["response_idx"]
+@@ -1312,7 +1831,13 @@ async def apply_verifiable_reward(
+             response_per_func_rewards[response_idx].get(dataset, 0) + weighted_reward
+         )
+ 
+-    return response_rewards, response_per_func_rewards
++        # Collect extra tracking scores (e.g., both SLR judges)
++        if hasattr(result, "extra_scores") and result.extra_scores:
++            for key, val in result.extra_scores.items():
++                response_extra_scores[response_idx].setdefault(key, 0.0)
++                response_extra_scores[response_idx][key] += reward_mult * val * reward_weight
++
++    return response_rewards, response_per_func_rewards, response_extra_scores
+ 
+ 
+ @dataclasses.dataclass
+@@ -1327,6 +1852,8 @@ class RewardConfig:
+     non_stop_penalty_value: float = -10.0
+     only_reward_good_outputs: bool = False
+     additive_format_reward: bool = False
++    apply_language_consistency_penalty: bool = False
++    """Multiply reward by a [0,1] score that detects script contamination (CJK, etc.) and n-gram repetition."""
+     verifier_functions: dict[str, VerifierFunction] = dataclasses.field(default_factory=dict)
+     reward_aggregator: Literal["last", "sum"] = "last"
+     """How to combine per-turn rewards: 'last' (use last turn reward) or 'sum' (sum all rewards across turns)."""
+@@ -1368,7 +1895,7 @@ class RewardConfig:
+                 metrics["val/format_scores"] = np.array(format_scores).mean()
+ 
+             if self.apply_verifiable_reward:
+-                verifiable_rewards, per_func_rewards = await apply_verifiable_reward(
++                verifiable_rewards, per_func_rewards, extra_score_rewards = await apply_verifiable_reward(
+                     self.verifier_functions,
+                     responses,
+                     decoded_responses,
+@@ -1412,6 +1939,25 @@ class RewardConfig:
+                     metrics[f"objective/{key}_reward"] = np_value.mean()
+                     metrics[f"objective/{key}_correct_rate"] = (np_value > 0.0).mean()
+ 
++                extra_score_lists: dict[str, list] = defaultdict(list)
++                for reward_dict in extra_score_rewards:
++                    for key, value in reward_dict.items():
++                        extra_score_lists[key].append(value)
++                for key, value in extra_score_lists.items():
++                    np_value = np.array(value)
++                    # Keys that already declare a namespace (e.g. "debug/...") are
++                    # used as-is; everything else gets the default "val/" prefix.
++                    metric_name = key if "/" in key else f"val/{key}"
++                    metrics[metric_name] = np_value.mean()
++
++            # Always compute language consistency for tracking; only apply as penalty when configured.
++            lc_scores = language_consistency_penalty(decoded_responses)
++            metrics["val/language_consistency"] = np.array(lc_scores).mean()
++            metrics["val/language_consistency_hist"] = np.array(lc_scores)
++            if self.apply_language_consistency_penalty:
++                for i in range(len(scores)):
++                    scores[i] = scores[i] * lc_scores[i]
++
+             if self.non_stop_penalty:
+                 assert len(finish_reasons) == len(scores)
+                 for i in range(len(finish_reasons)):
+diff --git a/open_instruct/grpo_fast.py b/open_instruct/grpo_fast.py
+index e7ed11290..1e4db2f90 100644
+--- a/open_instruct/grpo_fast.py
++++ b/open_instruct/grpo_fast.py
+@@ -86,7 +86,7 @@ from open_instruct.dataset_transformation import (
+     INPUT_IDS_PROMPT_KEY,
+     TOOLS_COLUMN_KEY,
+     TokenizerConfig,
+-    get_cached_dataset_tulu,
++    get_cached_dataset_tulu_with_statistics,
+     validate_dataset_tools,
+     visualize_token,
+ )
+@@ -1080,6 +1080,33 @@ def setup_experiment_tracking(args: grpo_utils.ExperimentConfig, tc: TokenizerCo
+     return beaker_config, wandb_url
+ 
+ 
++def _log_dataset_filter_stats(
++    split_name: str, statistics: dict[str, Any], max_prompt_token_length: int | None
++) -> None:
++    """Log per-dataset filter stats (e.g. how many prompts were dropped by max_prompt_token_length)."""
++    stats_list = statistics.get("per_dataset_stats") or []
++    if not stats_list:
++        return
++    logger.info(
++        "[%s dataset] Filter stats (prompts exceeding max_prompt_token_length=%s are dropped, not truncated):",
++        split_name,
++        max_prompt_token_length,
++    )
++    for s in stats_list:
++        initial = s.get("initial_instances", 0)
++        final = s.get("final_instances", 0)
++        filtered = s.get("instances_filtered", initial - final)
++        pct = (100.0 * filtered / initial) if initial else 0
++        logger.info(
++            "  %s: initial=%s, final=%s, filtered=%s (%.1f%%)",
++            s.get("dataset_name", "?"),
++            initial,
++            final,
++            filtered,
++            pct,
++        )
++
++
+ def _validate_and_log_dataset_tools(dataset, configured_tool_names: list[str] | None, dataset_name: str) -> None:
+     """Validate and log per-sample tool configuration for a dataset."""
+     if dataset and TOOLS_COLUMN_KEY in dataset.column_names and configured_tool_names:
+@@ -1119,14 +1146,17 @@ def setup_datasets(
+         logger.info(f"System prompt overriden to:\n#####\n{system_prompt_override}\n#####\n")
+ 
+     transform_fn_args = [
++        {},
+         {
+             "system_prompt_override": system_prompt_override,
+             "tool_definitions": tool_definitions,
+             "pass_tools_to_chat_template": pass_tools_to_chat_template,
++            "sft_messages_key": tc.sft_messages_key,
++            "ground_truths_key": tc.ground_truths_key,
+         },
+         {"max_prompt_token_length": streaming_config.max_prompt_token_length},
+     ]
+-    train_dataset = get_cached_dataset_tulu(
++    train_dataset, train_dataset_stats = get_cached_dataset_tulu_with_statistics(
+         dataset_mixer_list=streaming_config.dataset_mixer_list,
+         dataset_mixer_list_splits=streaming_config.dataset_mixer_list_splits,
+         tc=tc,
+@@ -1139,11 +1169,15 @@ def setup_datasets(
+         dataset_skip_cache=streaming_config.dataset_skip_cache,
+         system_prompt_override=system_prompt_override,
+     )
++    _log_dataset_filter_stats("train", train_dataset_stats, streaming_config.max_prompt_token_length)
+ 
+     _validate_and_log_dataset_tools(train_dataset, configured_tool_call_names, "train_dataset")
+ 
+-    if len(streaming_config.dataset_mixer_eval_list) > 0:
+-        eval_dataset = get_cached_dataset_tulu(
++    if args.local_eval_every <= 0:
++        eval_dataset = None
++        logger.info("In-loop evaluation disabled (local_eval_every=%s)", args.local_eval_every)
++    elif len(streaming_config.dataset_mixer_eval_list) > 0:
++        eval_dataset, eval_dataset_stats = get_cached_dataset_tulu_with_statistics(
+             dataset_mixer_list=streaming_config.dataset_mixer_eval_list,
+             dataset_mixer_list_splits=streaming_config.dataset_mixer_eval_list_splits,
+             tc=tc,
+@@ -1156,10 +1190,12 @@ def setup_datasets(
+             dataset_skip_cache=streaming_config.dataset_skip_cache,
+             system_prompt_override=system_prompt_override,
+         )
++        _log_dataset_filter_stats("eval", eval_dataset_stats, streaming_config.max_prompt_token_length)
+ 
+         _validate_and_log_dataset_tools(eval_dataset, configured_tool_call_names, "eval_dataset")
+     else:
+         eval_dataset = None
++        logger.info("No eval dataset (dataset_mixer_eval_list is empty)")
+ 
+     visualize_token(train_dataset[0][INPUT_IDS_PROMPT_KEY], tokenizer)
+ 
+@@ -1257,6 +1293,18 @@ def create_model_and_optimizer(
+     }
+     actor_manager = ray.remote(ActorManager).remote(queues_to_monitor, args, streaming_config, vllm_config)
+ 
++    # When resuming from a checkpoint, pause vLLM engines immediately so they don't
++    # generate with base model weights. They will be unpaused after checkpoint weights
++    # are broadcast to vLLM.
++    is_resuming = (
++        args.checkpoint_state_dir
++        and os.path.exists(args.checkpoint_state_dir)
++        and os.path.exists(os.path.join(args.checkpoint_state_dir, "latest"))
++    )
++    if is_resuming:
++        ray.get(actor_manager.set_should_stop.remote(True))
++        logger.info("Paused vLLM engines for checkpoint weight sync")
++
+     # Get model_dims early from HuggingFace config (doesn't require vLLM)
+     model_dims = utils.ModelDims.from_hf_config(model_config.model_name_or_path)
+ 
+@@ -1377,6 +1425,24 @@ def create_model_and_optimizer(
+     )
+     logger.info("======== ✅ model update group setup successfully =========")
+ 
++    # When resuming, vLLM engines were initialized with the base model weights.
++    # We must broadcast the checkpoint weights to vLLM BEFORE any generation starts,
++    # otherwise the first async_steps batches will be generated with stale base-model weights,
++    # causing large vllm_vs_local_logprob_diff and KL spikes.
++    if resume_training_step > 1 and vllm_engines:
++        logger.info("======== 🔄 Syncing checkpoint weights to vLLM engines before generation =========")
++        ray.get(actor_manager.set_should_stop.remote(True))
++        weight_broadcast_futures: list[ray.ObjectRef] = [m.broadcast_to_vllm.remote() for m in policy_group.models]
++        weight_broadcast_results, _ = ray_get_with_progress(
++            weight_broadcast_futures, desc="Broadcasting checkpoint weights to vLLM engines"
++        )
++        # Wait for all vLLM engine update RPCs to complete before allowing generation.
++        engine_update_refs = [ref for refs in weight_broadcast_results for ref in refs]
++        if engine_update_refs:
++            ray_get_with_progress(engine_update_refs, desc="Waiting for vLLM engine weight updates to complete")
++        ray.get(actor_manager.set_should_stop.remote(False))
++        logger.info("======== ✅ vLLM engines synced with checkpoint weights =========")
++
+     return (policy_group, vllm_engines, resume_training_step, episode, actor_manager, model_dims, _data_prep_actor)
+ 
+ 
+@@ -1409,8 +1475,8 @@ def weight_sync_thread(
+ ):
+     """Thread function that handles weight sync operations and actor manager coordination."""
+     logger.info("[Weight Sync Thread] 🚀 Starting weight sync thread")
+-    if resume_training_step > 1:
+-        weight_sync_trigger_event.set()
++    # Note: on resume, checkpoint weights are already synced to vLLM in create_model_and_optimizer,
++    # so we no longer trigger an immediate sync here.
+ 
+     while not stop_event.is_set():
+         # Wait for weight sync trigger from main thread
+@@ -1651,9 +1717,15 @@ def maybe_evaluate(
+         return True  # No eval to do, so consider it "successful"
+ 
+     try:
+-        # timeout 0.01 if this is not the last training step
+-        # otherwise, wait to get the last evaluation generations (long timeout just in case)
+-        timeout = 0.01 if training_step < args.num_training_steps else 100
++        # Use a short timeout on most steps to avoid blocking training.
++        # Use a longer timeout when we expect eval results: on steps that are multiples of
++        # local_eval_every (results from the previous eval cycle) and on the last step.
++        # Eval with LLM judge, code verification, or long generations can take many minutes.
++        is_expecting_eval_results = (
++            training_step % args.local_eval_every == 0 and training_step >= args.local_eval_every
++        ) or training_step >= args.num_training_steps
++        eval_timeout = args.eval_receive_timeout if args.eval_receive_timeout is not None else 600.0
++        timeout = eval_timeout if is_expecting_eval_results else 0.01
+ 
+         # Accumulate evaluation results from all vLLM engines
+         eval_result, eval_batch, eval_reward_metrics, _ = accumulate_inference_batches(
+@@ -2048,7 +2120,11 @@ def _discover_tools_from_datasets(dataset_mixer_list: list[str], dataset_mixer_l
+     for i in range(0, len(dataset_mixer_list), 2):
+         dataset_name = dataset_mixer_list[i]
+         split = splits[i // 2]
+-        ds = datasets.load_dataset(dataset_name, split=split)
++        # Support dataset name with config, e.g. "AIML-TUDA/SLR-Bench:v1-All"
++        hf_config = None
++        if ":" in dataset_name:
++            dataset_name, hf_config = dataset_name.split(":", 1)
++        ds = datasets.load_dataset(dataset_name, hf_config, split=split)
+         if TOOLS_COLUMN_KEY in ds.column_names:
+             for tools in ds[TOOLS_COLUMN_KEY]:
+                 if tools:
+@@ -2186,7 +2262,24 @@ def main(
+     beaker_config, wandb_url = setup_experiment_tracking(args, tc, model_config)
+ 
+     # We have to initialize ray earlier for constructing Tools (they are implemented as ray actors).
+-    ray.init(dashboard_host="0.0.0.0", runtime_env={"excludes": [".git/"], "env_vars": dict(os.environ)})
++    # If RAY_ADDRESS is set (e.g. by a multi-node Slurm script), connect to the existing cluster
++    # so placement groups can use STRICT_SPREAD across nodes. Otherwise start a local cluster.
++    ray_init_kwargs: dict = {
++        "dashboard_host": "0.0.0.0",
++        "runtime_env": {
++            "excludes": [".git/", ".venv/", "output/", "logs/", "wandb/", "cache/", "site/"],
++            "env_vars": dict(os.environ),
++        },
++    }
++    if os.environ.get("RAY_ADDRESS"):
++        ray_init_kwargs["address"] = "auto"
++        logger.info("Connecting to existing Ray cluster (RAY_ADDRESS is set)")
++    else:
++        # Only upload working dir for local clusters.  Multi-node setups
++        # (Slurm / Beaker) share files via bind-mount or Docker image, so
++        # uploading is unnecessary and causes slow UV re-installs per worker.
++        runtime_env["excludes"] = [".git/", "output/"]
++    ray.init(**ray_init_kwargs)
+ 
+     pool_size = tools_config.pool_size
+     if pool_size is None:
+@@ -2246,6 +2339,7 @@ def main(
+         non_stop_penalty_value=streaming_config.non_stop_penalty_value,
+         only_reward_good_outputs=tools_config.only_reward_good_outputs,
+         additive_format_reward=streaming_config.additive_format_reward,
++        apply_language_consistency_penalty=streaming_config.apply_language_consistency_penalty,
+         verifier_functions=build_all_verifiers(args, streaming_config),
+         reward_aggregator=streaming_config.reward_aggregator,
+     )
+diff --git a/open_instruct/grpo_utils.py b/open_instruct/grpo_utils.py
+index 104e7684b..e7342bd2d 100644
+--- a/open_instruct/grpo_utils.py
++++ b/open_instruct/grpo_utils.py
+@@ -60,6 +60,8 @@ class ExperimentConfig:
+     """RUNTIME VALUE: The number of training_steps to train"""
+     local_eval_every: int = 100
+     """Run evaluation after this many training steps. This controls in-loop evals, which reuse the generation/reward verifier setup. Set to -1 to disable."""
++    eval_receive_timeout: float | None = None
++    """Seconds to wait for eval results when receiving them. Eval runs asynchronously; with LLM judge or long generations this can take several minutes. Increase if eval metrics never appear."""
+     save_freq: int = 200
+     """How many train steps to save the model"""
+     backend_timeout: int = 120
+diff --git a/open_instruct/judge_utils.py b/open_instruct/judge_utils.py
+index e00e20ccf..ee0b2e2e9 100644
+--- a/open_instruct/judge_utils.py
++++ b/open_instruct/judge_utils.py
+@@ -194,57 +194,67 @@ def extract_score_from_string(score_str: str) -> float:
+         return 0.0
+ 
+ 
+-def extract_score_web_instruct(score_str: str) -> "tuple[str, float]":
+-    """Extractor based on web instruct format"""
++def extract_score_web_instruct(score_str: str) -> "tuple[str, float, str]":
++    """Extractor based on web instruct format.
++
++    Returns (reasoning, score, status) where status is "ok" on a recognized
++    verdict and "hard_fail" otherwise. The caller may use the status to drive
++    retry logic and telemetry.
++    """
+     if "final decision: yes" in score_str.lower():
+-        return score_str, 1.0
++        return score_str, 1.0, "ok"
+     elif "final decision: no" in score_str.lower():
+-        return score_str, 0.0
+-    logger.warning(f"Could not parse score from: {score_str}, defaulting to 0.0")
+-    return score_str, 0.0
++        return score_str, 0.0, "ok"
++    raise ValueError(f"[LLM JUDGE] Could not parse web_instruct verdict from: {score_str}")
+ 
+ 
+-def extract_json_score_with_fallback(score_str: str) -> "tuple[str, float]":
+-    """Extractor based on json score with fallback"""
++def extract_json_score_with_fallback(score_str: str) -> "tuple[str, float, str]":
++    """Extractor based on json score with fallback.
++
++    Returns (reasoning, score, status) where status is:
++      - "ok"          : SCORE parsed cleanly from JSON.
++      - "regex_saved" : JSON parse failed but a SCORE was recovered via regex.
++    Raises ValueError if neither JSON nor regex could recover a SCORE; the
++    caller is expected to treat that as a hard parse failure.
++    """
+     try:
+-        # Strip markdown code blocks if present
++        # Strip markdown code fences if present.
+         cleaned_str = score_str.strip()
+-        if cleaned_str.startswith("```json"):
+-            cleaned_str = cleaned_str[7:]  # Remove ```json
+-        elif cleaned_str.startswith("```"):
+-            cleaned_str = cleaned_str[3:]  # Remove ```
+-
+-        if cleaned_str.endswith("```"):
+-            cleaned_str = cleaned_str[:-3]  # Remove trailing ```
+-
+-        # escape newlines
+-        cleaned_str = cleaned_str.replace("\r\n", "\n").replace("\n", "\\n")
+-        # escape backslashes
+-        cleaned_str = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", cleaned_str)
+-
++        cleaned_str = re.sub(r"^```(?:json)?\s*", "", cleaned_str, flags=re.IGNORECASE)
++        cleaned_str = re.sub(r"\s*```$", "", cleaned_str)
+         cleaned_str = cleaned_str.strip()
+ 
+-        try:
+-            data = json.loads(cleaned_str)
+-            reasoning = data.get("REASONING", "")
+-            score = float(data.get("SCORE", 0.0))
+-        except json.JSONDecodeError as e:
+-            score_match = re.search(r'"SCORE"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?', cleaned_str)
+-            if score_match:
+-                score = float(score_match.group(1))
+-                reasoning = cleaned_str
+-            else:
+-                raise ValueError() from e
+-        return reasoning, score
+-    except (json.JSONDecodeError, TypeError, ValueError):
+-        logger.warning(f"Could not parse score from due to invalid json: {score_str}, defaulting to 0.0")
+-        return score_str, 0.0
+-
+-
+-def extract_score_with_fallback_max_10(score_str: str) -> "tuple[str, float]":
+-    """Extractor based on score with fallback"""
+-    reasoning, score = extract_json_score_with_fallback(score_str)
+-    return reasoning, score / 10.0
++        # Some judges include explanatory text around the JSON payload.
++        candidate_json_strs = [cleaned_str]
++        json_obj_match = re.search(r"\{.*\}", cleaned_str, flags=re.DOTALL)
++        if json_obj_match:
++            json_obj_str = json_obj_match.group(0).strip()
++            if json_obj_str != cleaned_str:
++                candidate_json_strs.insert(0, json_obj_str)
++
++        for candidate in candidate_json_strs:
++            try:
++                data = json.loads(candidate)
++                reasoning = data.get("REASONING", "")
++                score = float(data.get("SCORE", 0.0))
++                return reasoning, score, "ok"
++            except json.JSONDecodeError:
++                continue
++
++        score_match = re.search(r'[\["\s]?SCORE[\]"\s]?\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?', cleaned_str)
++        if score_match:
++            score = float(score_match.group(1))
++            reasoning = cleaned_str
++            return reasoning, score, "regex_saved"
++        raise ValueError()
++    except (json.JSONDecodeError, TypeError, ValueError) as err:
++        raise ValueError(f"[LLM JUDGE] Could not parse score, invalid json: {score_str}") from err
++
++
++def extract_score_with_fallback_max_10(score_str: str) -> "tuple[str, float, str]":
++    """Extractor based on score with fallback, normalized to [0, 1]."""
++    reasoning, score, status = extract_json_score_with_fallback(score_str)
++    return reasoning, score / 10.0, status
+ 
+ 
+ JUDGE_PROMPT_MAP = {
+diff --git a/open_instruct/slr/parsing.py b/open_instruct/slr/parsing.py
+new file mode 100644
+index 000000000..7bae9336a
+--- /dev/null
++++ b/open_instruct/slr/parsing.py
+@@ -0,0 +1,203 @@
++import re
++
++
++def extract_code_block(text: str) -> str:
++    """
++    If the text contains [RULE]...[/RULE] (or variants) or fenced code blocks,
++    return the last block's content. Otherwise return the original text.
++    """
++    if not isinstance(text, str):
++        return text
++
++    # Remove leading "thinking" content if present
++    if "</think>" in text:
++        text = text.split("</think>")[-1]
++
++    # [RULE] ... [/RULE] variants, including [\RULE], [ /RULE]
++    rule_blocks = re.findall(r"\[RULE\]\s*(.*?)\s*\[\s*\\?/RULE\s*\]", text, re.DOTALL | re.IGNORECASE)
++    if rule_blocks:
++        return rule_blocks[-1].strip()
++
++    # Fenced code blocks ```...```
++    blocks = re.findall(r"```(?:[a-zA-Z0-9_+-]+)?\s*(.*?)```", text, re.DOTALL)
++    if blocks:
++        return blocks[-1].strip()
++
++    # Fallback: split on common "final answer" markers
++    markers = ["### Final Answer:", "Final Answer:", "### Final:", "Final:", "Answer:", "Final rule:", "Rule:"]
++    lower_text = text.lower()
++    for marker in markers:
++        idx = lower_text.rfind(marker.lower())
++        if idx != -1:
++            return text[idx + len(marker) :].strip()
++    return text
++
++
++def parse_complex(text):
++    """
++    Extracts all facts and rules from the text.
++    Unlike v2, this extracts ALL Prolog syntax regardless of predicate.
++    This allows shortcuts like eastbound(train1). to be accepted by local judge.
++
++    Args:
++        text (str): The text to extract the ILP from.
++    Returns:
++        str: The ILP containing all facts and rules found.
++    Examples:
++        >>> parse_rule_v3("eastbound(train0).")
++        "eastbound(train0)."
++        >>> parse_rule_v3("eastbound(T) :- has_car(T, C). eastbound(train1).")
++        "eastbound(T) :- has_car(T, C).\neastbound(train1)."
++    """
++    # Prefer fenced code blocks if present
++    has_code_block = bool(re.search(r"```", text))
++    text = extract_code_block(text)
++    text = re.sub(r"%.*?(?=\n|$)", "", text)  # remove comments
++    # If no code block is present, try a strict line-based extraction first
++    # to avoid pulling facts from natural language sentences.
++    if not has_code_block:
++        strict_rule_pattern = r"(?m)^\s*([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*:-[^.]*\.)\s*$"
++        strict_fact_pattern = r"(?m)^\s*([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*\.)\s*$"
++        strict_rules = re.findall(strict_rule_pattern, text)
++        strict_facts = re.findall(strict_fact_pattern, text)
++        if strict_rules or strict_facts:
++            p_code = ""
++            for rule in strict_rules:
++                statement = rule.strip()
++                if not statement.endswith("."):
++                    statement += "."
++                p_code += statement + "\n"
++
++            for fact in strict_facts:
++                statement = fact.strip()
++                if not statement.endswith("."):
++                    statement += "."
++                # Exclude facts that appear inside any rule (head or body)
++                is_part_of_rule = False
++                fact_without_dot = statement.rstrip(".")
++                for rule in strict_rules:
++                    fact_normalized = fact_without_dot.replace(" ", "")
++                    rule_normalized = rule.replace(" ", "")
++                    if fact_normalized in rule_normalized:
++                        is_part_of_rule = True
++                        break
++                if not is_part_of_rule:
++                    p_code += statement + "\n"
++
++            return p_code.strip()
++
++    # Pre-process: collapse code blocks to single lines
++    text = re.sub(r"\n\s*", " ", text)  # crude: flatten all to one line
++
++    p_code = ""
++
++    # Pattern 1: Extract rules (with :- body)
++    # Matches: predicate(args) :- body.
++    rule_pattern = r"([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*:-[^.]*\.)"
++    rules = re.findall(rule_pattern, text)
++    for rule in rules:
++        statement = rule.strip()
++        if not statement.endswith("."):
++            statement += "."
++        p_code += statement + "\n"
++
++    # Pattern 2: Extract facts (no :- body)
++    # Matches: predicate(args).
++    # But exclude facts that are part of rules (already captured above)
++    fact_pattern = r"([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*\.)"
++    facts = re.findall(fact_pattern, text)
++    rule_statements_set = set(rule.strip() for rule in rules)
++
++    for fact in facts:
++        statement = fact.strip()
++        if not statement.endswith("."):
++            statement += "."
++        # Only add if it's a pure fact (not part of any rule we already captured)
++        # A fact is part of a rule if it appears anywhere in that rule (head or body)
++        is_part_of_rule = False
++        fact_without_dot = statement.rstrip(".")
++
++        for rule in rules:
++            # Check if this fact appears anywhere in the rule
++            # Remove spaces for comparison to handle whitespace differences
++            fact_normalized = fact_without_dot.replace(" ", "")
++            rule_normalized = rule.replace(" ", "")
++
++            # Check if the fact (without the final dot) appears in the rule
++            # This catches both head and body occurrences
++            if fact_normalized in rule_normalized:
++                is_part_of_rule = True
++                break
++
++        # Only add standalone facts (not part of any rule)
++        if not is_part_of_rule:
++            p_code += statement + "\n"
++
++    return p_code.strip()
++
++
++def parse_simple(text):
++    """
++    Extracts all facts and rules from the text.
++    Unlike v2, this extracts ALL Prolog syntax regardless of predicate.
++    This allows shortcuts like eastbound(train1). to be accepted by local judge.
++
++    Args:
++        text (str): The text to extract the ILP from.
++    Returns:
++        str: The ILP containing all facts and rules found.
++    Examples:
++        >>> extract_ilp_from_text("eastbound(train0).")
++        "eastbound(train0)."
++        >>> extract_ilp_from_text("eastbound(T) :- has_car(T, C). eastbound(train1).")
++        "eastbound(T) :- has_car(T, C).\neastbound(train1)."
++    """
++    text = re.sub(r"%.*?(?=\n|$)", "", text)  # remove comments
++    # Pre-process: collapse code blocks to single lines
++    text = re.sub(r"\n\s*", " ", text)  # crude: flatten all to one line
++
++    p_code = ""
++
++    # Pattern 1: Extract rules (with :- body)
++    # Matches: predicate(args) :- body.
++    rule_pattern = r"([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*:-[^.]*\.)"
++    rules = re.findall(rule_pattern, text)
++    for rule in rules:
++        statement = rule.strip()
++        if not statement.endswith("."):
++            statement += "."
++        p_code += statement + "\n"
++
++    # Pattern 2: Extract facts (no :- body)
++    # Matches: predicate(args).
++    # But exclude facts that are part of rules (already captured above)
++    fact_pattern = r"([a-zA-Z_][a-zA-Z0-9_]*\([^)]*\)\s*\.)"
++    facts = re.findall(fact_pattern, text)
++    rule_statements_set = set(rule.strip() for rule in rules)
++
++    for fact in facts:
++        statement = fact.strip()
++        if not statement.endswith("."):
++            statement += "."
++        # Only add if it's a pure fact (not part of any rule we already captured)
++        # A fact is part of a rule if it appears anywhere in that rule (head or body)
++        is_part_of_rule = False
++        fact_without_dot = statement.rstrip(".")
++
++        for rule in rules:
++            # Check if this fact appears anywhere in the rule
++            # Remove spaces for comparison to handle whitespace differences
++            fact_normalized = fact_without_dot.replace(" ", "")
++            rule_normalized = rule.replace(" ", "")
++
++            # Check if the fact (without the final dot) appears in the rule
++            # This catches both head and body occurrences
++            if fact_normalized in rule_normalized:
++                is_part_of_rule = True
++                break
++
++        # Only add standalone facts (not part of any rule)
++        if not is_part_of_rule:
++            p_code += statement + "\n"
++
++    return p_code.strip()
+diff --git a/open_instruct/slr/slr_verifier.py b/open_instruct/slr/slr_verifier.py
+new file mode 100644
+index 000000000..8e6dd84c8
+--- /dev/null
++++ b/open_instruct/slr/slr_verifier.py
+@@ -0,0 +1,140 @@
++import logging
++import os
++import re
++import subprocess
++import tempfile
++import time
++
++logger = logging.getLogger(__name__)
++
++
++def prepare_validation_program(validation_program, positive_pred="eastbound", negative_pred="westbound"):
++    """
++    Fixes the validation program by ensuring it has a consistent format.
++    - Removes comments
++    - Ensures all rules end with a period
++    - Removes empty lines
++    """
++    validation_program = re.sub(rf"\b{positive_pred}\b", "pos", validation_program)
++    validation_program = re.sub(rf"\b{negative_pred}\b", "neg", validation_program)
++    return validation_program
++
++
++def prepare_validation_program_isomorphic(validation_program, positive_pred="eastbound", negative_pred="westbound"):
++    """
++    Fixes the validation program by ensuring it has a consistent format.
++    - Removes comments
++    - Ensures all rules end with a period
++    - Removes empty lines
++    """
++    # anonymize train and car instances, and head predicates
++    validation_program = re.sub(rf"\b{positive_pred}\b", "pos", validation_program)
++    validation_program = re.sub(rf"\b{negative_pred}\b", "neg", validation_program)
++    # replace train with mytrain and car with mycar
++    # trains must follow a digit pattern train\d+ and cars must follow a pattern car\d+_\d+
++    validation_program = validation_program.replace("(train", "(mytrain")
++    validation_program = validation_program.replace("(car", "(mycar").replace(", car", ", mycar")
++    return validation_program
++
++
++def evaluate_prediction(prediction, validation_program, eval_config, timeout=5, isomorphic=True):
++    """
++    Evaluates a predicted rule against the validation program using Prolog.
++    """
++
++    # Extract configuration
++    positive_pred = eval_config.get("positive_predicate", "eastbound")
++    negative_pred = eval_config.get("negative_predicate", "westbound")
++
++    if positive_pred not in prediction:
++        p = prediction.replace("\n", " ")
++        return {
++            "is_correct": False,
++            "partial_score": 0.0,
++            "syntax_valid": False,
++            "error": f"Invalid Syntax: Logic Rule not found for symbol '{positive_pred}': {p}",
++        }
++
++    pos_examples = re.findall(rf"{positive_pred}\(([^)]+)\)", validation_program)
++    neg_examples = re.findall(rf"{negative_pred}\(([^)]+)\)", validation_program)
++
++    # Determine arity by counting commas in first example plus 1
++    arity = 1  # default to unary
++    if pos_examples:
++        arity = pos_examples[0].count(",") + 1
++    elif neg_examples:
++        arity = neg_examples[0].count(",") + 1
++
++    # Create variables based on arity
++    vars = ", ".join([f"X{i}" for i in range(1, arity + 1)])
++
++    symbolic_judge = f"""
++% Dynamic evaluation predicates
++check({vars}) :- pos({vars}), {positive_pred}({vars}).      % positive covered
++check({vars}) :- neg({vars}), \\+ {positive_pred}({vars}).  % negative rejected
++% Count successful checks
++check_count(Count) :-
++    (setof(({vars}), ((pos({vars}); neg({vars})), check({vars})), CorrectExamples) ->
++        length(CorrectExamples, Count)
++    ;
++        Count = 0
++    ).
++check_all :- forall((pos({vars});neg({vars})), check({vars})).
++    """
++    # Add the rule to evaluate
++    if isomorphic:
++        validation_program = prepare_validation_program_isomorphic(validation_program, positive_pred, negative_pred)
++    else:
++        validation_program = prepare_validation_program(validation_program, positive_pred, negative_pred)
++
++    pos_negs = validation_program.count("pos(") + validation_program.count("neg(")
++    validation_program = "\n".join(sorted(validation_program.splitlines()))
++    full_program = validation_program + "\n\n" + symbolic_judge + "\n\n" + prediction + "\n\n"
++
++    with tempfile.NamedTemporaryFile(suffix=".pl", mode="w", delete=False) as f:
++        f.write(full_program)
++        temp_file = f.name
++
++    result = None
++    try:
++        eval_start_time = time.time()
++        # Execute the Prolog program
++        cmd = ["swipl", "-s", temp_file, "-g", "check_count(Count), writeln(Count)", "-t", "halt"]
++        result = subprocess.run(cmd, capture_output=True, timeout=timeout, text=True)
++        partial_score = 0.0 if result.stdout.strip() == "" else int(result.stdout.strip())
++        # Extract partial score from output
++        partial_score = partial_score / pos_negs if pos_negs > 0 else 0.0
++
++        is_correct = partial_score == 1.0
++
++        error = f'{result.stderr} -> Eval Rule "{prediction}"' if result.stderr else None
++        t1 = time.time()
++
++        return {
++            "is_correct": is_correct,
++            "partial_score": partial_score,
++            "syntax_valid": True,
++            "error": error,
++            "exec_time1": t1 - eval_start_time,
++        }
++
++    except subprocess.TimeoutExpired:
++        r = prediction.replace("\n", " ")
++        logger.warning(f"[SLR Reward Model] Evaluation timed out after {timeout} seconds for rule: '{r}'")
++        return {
++            "is_correct": False,
++            "partial_score": 0.0,
++            "syntax_valid": False,
++            "error": f"Evaluation timed out after {timeout} seconds for rule: '{r}'",
++        }
++    except Exception as e:
++        logger.warning(f"[SLR Reward Model] Error evaluating rule '{prediction}': {e}")
++        return {
++            "is_correct": False,
++            "partial_score": 0.0,
++            "syntax_valid": False,
++            "error": f"Error evaluating rule '{prediction}' returns: '{result.stdout.strip() if result is not None else 'No error message'}' with error: {e}",
++        }
++    finally:
++        if os.path.exists(temp_file):
++            os.remove(temp_file)
+diff --git a/open_instruct/test_ground_truth_utils.py b/open_instruct/test_ground_truth_utils.py
+index 70786dca1..667b0498c 100644
+--- a/open_instruct/test_ground_truth_utils.py
++++ b/open_instruct/test_ground_truth_utils.py
+@@ -4,10 +4,17 @@ Test script for verifier functionality in Python
+ """
+ 
+ import unittest
++from unittest.mock import patch
+ 
+ from parameterized import parameterized
+ 
+-from open_instruct.ground_truth_utils import F1Verifier, PuzzleMatcherVerifier
++from open_instruct.ground_truth_utils import (
++    F1Verifier,
++    PuzzleMatcherVerifier,
++    SLRBenchVerifier,
++    SLRBenchVerifierConfig,
++)
++from open_instruct.slr.slr_verifier import evaluate_prediction
+ 
+ 
+ class TestPuzzleMatcherVerifier(unittest.TestCase):
+@@ -143,5 +150,92 @@ class TestF1Verifier(unittest.TestCase):
+         )
+ 
+ 
++class TestSLRBenchVerifier(unittest.TestCase):
++    """Tests for SLRBenchVerifier helper logic and SLR runtime edge cases."""
++
++    def test_extract_prolog_rule_tiered(self):
++        verifier = SLRBenchVerifier(SLRBenchVerifierConfig())  # default: code_block parsing
++        tagged = "<think>reasoning</think><answer>[RULE] eastbound(T) :- has_car(T,C). [/RULE]</answer>"
++        codeblock = "<answer>```prolog\neastbound(T) :- has_car(T,C).\n```</answer>"
++        plain = "eastbound(T) :- has_car(T,C)."
++
++        tagged_rule, tagged_format_ok = verifier._extract_prolog_rule(tagged)
++        code_rule, code_format_ok = verifier._extract_prolog_rule(codeblock)
++        plain_rule, plain_format_ok = verifier._extract_prolog_rule(plain)
++
++        self.assertEqual(tagged_rule, "eastbound(T) :- has_car(T,C).")
++        self.assertTrue(tagged_format_ok)
++
++        self.assertEqual(code_rule, "eastbound(T) :- has_car(T,C).")
++        self.assertTrue(code_format_ok)
++
++        # plain text with no tags/code blocks falls through to return cleaned text
++        self.assertEqual(plain_rule, plain)
++        self.assertFalse(plain_format_ok)
++
++    def test_compute_reward_sparse_and_syntax_agnostic(self):
++        verifier = SLRBenchVerifier(SLRBenchVerifierConfig())
++        # No free floor reward for wrong predictions when gate is enabled.
++        self.assertEqual(verifier.compute_reward(0.0, 0.0, 1.0, 0.8, k=6, partial_gate=0.5), 0.0)
++        self.assertEqual(verifier.compute_reward(0.0, 0.49, 1.0, 0.8, k=6, partial_gate=0.5), 0.0)
++
++        # syntax_score is intentionally ignored by current design.
++        no_syntax = verifier.compute_reward(0.0, 0.7, 0.0, 0.8, k=6, partial_gate=0.5)
++        with_syntax = verifier.compute_reward(0.0, 0.7, 1.0, 0.8, k=6, partial_gate=0.5)
++        self.assertEqual(no_syntax, with_syntax)
++
++        # Full accuracy should remain near 1.0.
++        full = verifier.compute_reward(1.0, 1.0, 1.0, 0.8)
++        self.assertGreaterEqual(full, 0.95)
++        self.assertLessEqual(full, 1.0)
++
++    def test_compute_reward_partial_mode(self):
++        verifier = SLRBenchVerifier(SLRBenchVerifierConfig(slr_reward_function="partial"))
++        # In partial mode, compute_reward just returns the raw partial_score.
++        self.assertEqual(verifier.compute_reward(0.0, 0.7, 1.0, 0.8), 0.7)
++        self.assertEqual(verifier.compute_reward(1.0, 1.0, 1.0, 0.8), 1.0)
++        self.assertEqual(verifier.compute_reward(0.0, 0.0, 0.0, 0.0), 0.0)
++
++    def test_evaluate_prediction_handles_missing_swipl(self):
++        validation_program = "eastbound(train0).\nwestbound(train1)."
++        eval_config = {"positive_predicate": "eastbound", "negative_predicate": "westbound"}
++
++        with patch("open_instruct.slr.slr_verifier.subprocess.run", side_effect=FileNotFoundError("swipl missing")):
++            result = evaluate_prediction(
++                prediction="eastbound(T) :- true.",
++                validation_program=validation_program,
++                eval_config=eval_config,
++                timeout=1,
++                isomorphic=False,
++            )
++
++        self.assertFalse(result["is_correct"])
++        self.assertEqual(result["partial_score"], 0.0)
++        self.assertFalse(result["syntax_valid"])
++        self.assertIn("swipl", result["error"])
++
++    def test_selected_score_follows_slr_reward_config(self):
++        label = {
++            "validation_program": "eastbound(train0).\nwestbound(train1).",
++            "evaluation_config": {"positive_predicate": "eastbound", "negative_predicate": "westbound"},
++        }
++        prediction = "<answer>[RULE] eastbound(T) :- true. [/RULE]</answer>"
++
++        def fake_eval(_rule, _vp, _cfg, timeout=5, isomorphic=True):
++            return {"is_correct": False, "partial_score": 0.9 if isomorphic else 0.6, "syntax_valid": True}
++
++        # base-selected run should return base score, while still tracking both.
++        verifier_base = SLRBenchVerifier(SLRBenchVerifierConfig(slr_reward="base"))
++        verifier_base._evaluate_prediction = fake_eval
++        result_base = verifier_base([], prediction, label)
++        self.assertEqual(result_base.score, result_base.extra_scores["slr_bench_base"])
++
++        # isomorphic-selected run should return isomorphic score.
++        verifier_iso = SLRBenchVerifier(SLRBenchVerifierConfig(slr_reward="isomorphic"))
++        verifier_iso._evaluate_prediction = fake_eval
++        result_iso = verifier_iso([], prediction, label)
++        self.assertEqual(result_iso.score, result_iso.extra_scores["slr_bench_isomorphic"])
++
++
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/open_instruct/utils.py b/open_instruct/utils.py
+index 3a29519a6..a8c23be2b 100644
+--- a/open_instruct/utils.py
++++ b/open_instruct/utils.py
+@@ -220,7 +220,9 @@ def ray_get_with_progress(
+             results[idx] = future.result()
+             completion_times[idx] = time.perf_counter() - t0
+     except TimeoutError as e:
+-        raise TimeoutError(f"{desc} failed.") from e
++        raise TimeoutError(f"{desc} failed with timeout {timeout} seconds.") from e
++    except Exception as e:
++        raise Exception(f"{desc} failed with error: {e}") from e
+ 
+     return results, completion_times
+ 
+diff --git a/open_instruct/vllm_utils.py b/open_instruct/vllm_utils.py
+index 759aeb918..054fccf58 100644
+--- a/open_instruct/vllm_utils.py
++++ b/open_instruct/vllm_utils.py
+@@ -869,12 +869,16 @@ class LLMRayActor:
+ 
+ 
+ async def process_request(actor: LLMRayActor, sub_request_id: str, sampling_params: SamplingConfig):
+-    """Process a single async request with tool/environment support."""
+-    await _check_health(actor.server_port)
+-
+-    response_tokens: list[int] = []
+-    response_logprobs: list[float] = []
+-    response_masks: list[int] = []
++    """Process a single async request with tool support, awaiting tools inline."""
++    # NOTE: _check_health is intentionally NOT called here. It is only needed at startup
++    # (see _init_openai_client). Calling it on every request is wasteful and causes spurious
++    # TimeoutError crashes when the vLLM server is busy processing long generations: the HTTP
++    # health-check times out, asyncio.TimeoutError propagates through active_tasks, and
++    # check_background_threads() incorrectly kills the training run.
++    # Engine liveness is already monitored via loop_thread.is_alive() in check_background_threads.
++    response_tokens = []
++    response_logprobs = []
++    response_masks = []
+     cumulative_logprob = 0.0
+     rollout = RolloutState()
+ 
+@@ -1171,6 +1175,23 @@ def create_vllm_engines(
+             placement_group_bundle_index=bundle_indices[0],
+         )
+ 
++        # Assign unique ports per engine to avoid EADDRINUSE when many engines
++        # initialize simultaneously (e.g. 48 engines across 6 nodes).
++        #
++        # VLLM_DP_MASTER_PORT: used by vLLM for internal data-parallel communication.
++        #   get_open_port() avoids this range, but we must set it so vLLM knows to.
++        #
++        # VLLM_PORT: used by _get_open_port() as a deterministic starting port for
++        #   torch.distributed TCPStore. Without this, each engine calls bind(0) to get
++        #   an OS-assigned ephemeral port and releases it before TCPStore binds — a
++        #   TOCTOU race that causes EADDRINUSE when 8+ engines start on the same node.
++        #   With VLLM_PORT set, _get_open_port() tries sequential ports starting from
++        #   this value, incrementing on conflict, which is race-free.
++        #
++        # We space ports 100 apart per engine to leave room for internal sub-ports.
++        vllm_dp_master_port = 29600 + i
++        vllm_port = 30000 + i * 100
++
+         vllm_engines.append(
+             ray.remote(LLMRayActor)
+             .options(
+@@ -1182,6 +1203,8 @@ def create_vllm_engines(
+                         "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+                         "TORCH_CUDA_ARCH_LIST": get_cuda_arch_list(),
+                         "RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO": "0",
++                        "VLLM_DP_MASTER_PORT": str(vllm_dp_master_port),
++                        "VLLM_PORT": str(vllm_port),
+                     }
+                 ),
+             )

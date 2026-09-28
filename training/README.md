@@ -11,6 +11,19 @@ All runs use the open-instruct GRPO pipeline of Olmo 3 and start from `allenai/O
 
 Both verifiers use the same scoring rule (completeness and consistency over the examples). Every run logs both rewards; their difference is the *hacking gap* reported in the paper.
 
+## Pipeline changes (`open_instruct_slr.patch`)
+
+The runs use the public [open-instruct](https://github.com/allenai/open-instruct) GRPO trainer with a small set of changes: the SLR-Bench dataset conversion, the extensional/isomorphic reward and its `--slr_reward`, `--slr_reward_function`, `--slr_parsing` flags, and the extensional-plus-isomorphic monitoring that logs the hacking gap. `open_instruct_slr.patch` is the diff of those changes against upstream commit `f4187acbd` (2026-03-02). To reproduce:
+
+```bash
+git clone https://github.com/allenai/open-instruct && cd open-instruct
+git checkout f4187acbddf4b31902728444cc7c318178c81431
+git apply /path/to/training/open_instruct_slr.patch      # adds open_instruct/slr/ and the reward wiring
+mkdir -p scripts/train/slr && cp /path/to/training/scripts/*.sh scripts/train/slr/   # ray/judge/code-API setup sourced by the launch scripts
+```
+
+`slr_verifier.py` and `parsing.py` in this directory are the same files the patch adds under `open_instruct/slr/`, kept here for reading without applying the patch.
+
 ## Launch scripts (`scripts/`)
 
 | Script | Run |
