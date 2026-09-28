@@ -4,7 +4,7 @@ All runs use the open-instruct GRPO pipeline of Olmo 3 and start from `allenai/O
 
 ## Verifier
 
-`slr_verifier.py` implements both rewards; `parsing.py` extracts the hypothesis from a rollout.
+`slr_verifier.py` implements both rewards.
 
 * **Extensional** (`iso=False`): the hypothesis is executed with SWI-Prolog against the task program as given, i.e. background knowledge plus the labeled examples. A rule that enumerates identifiers or refers to the labels passes.
 * **Isomorphic** (`iso=True`): the same check on a copy of the task in which all object constants are bijectively renamed and the labels are not exposed; only rules over the background predicates pass.
@@ -22,7 +22,7 @@ git apply /path/to/training/open_instruct_slr.patch      # adds open_instruct/sl
 mkdir -p scripts/train/slr && cp /path/to/training/scripts/*.sh scripts/train/slr/   # ray/judge/code-API setup sourced by the launch scripts
 ```
 
-`slr_verifier.py` and `parsing.py` in this directory are the same files the patch adds under `open_instruct/slr/`, kept here for reading without applying the patch.
+`slr_verifier.py` in this directory is the same file the patch adds under `open_instruct/slr/`, kept here for reading without applying the patch.
 
 ## Launch scripts (`scripts/`)
 
