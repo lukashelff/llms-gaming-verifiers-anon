@@ -3,7 +3,7 @@
 #   Task 0 = judge (code API + LLM judge vLLM)
 #   Task 1 = Ray head (gradient updates via grpo_fast.py)
 #   Tasks 2–7 = Ray workers (48 vLLM inference engines)
-#SBATCH --job-name=MultiReward-SLR-Extensional
+#SBATCH --job-name=MultiReward-Iso-RLVR
 #SBATCH --partition=all
 #SBATCH --nodes=7
 #SBATCH --gpus-per-node=8
@@ -15,10 +15,10 @@
 #SBATCH --error=logs/%x_%j/error.err
 #SBATCH --qos=normal
 #SBATCH --open-mode=append
-#SBATCH --exclude=cn[02,06,10,13,15,18-19,25,32,35]
+#SBATCH --exclude=cn[02,10,35]
 
 # --- 1. Configuration ---
-JOB_NAME="MultiReward-SLR-Extensional"
+JOB_NAME="MultiReward-Iso-RLVR"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
@@ -88,7 +88,7 @@ APPTAINER_ENV=(
   --env "RAY_ADDRESS=$RAY_ADDRESS"
   --env "RAY_PORT=$RAY_PORT"
   --env "RAY_HEAD_PROCID=1"
-  --env "RAY_DEDUP_LOGS=1"
+  --env "RAY_DEDUP_LOGS=0"
   --env "HOSTED_VLLM_API_BASE=$HOSTED_VLLM_API_BASE"
   --env "CODE_API_URL=$CODE_API_URL"
   --env "CODE_API_PORT=$CODE_API_PORT"
@@ -145,7 +145,7 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --vllm_sync_backend nccl \
   --lr_scheduler_type constant \
   --apply_verifiable_reward true \
-  --slr_reward base \
+  --slr_reward isomorphic \
   --slr_reward_function partial \
   --slr_parsing simple \
   --llm_judge_model hosted_vllm/$LLM_JUDGE_MODEL \

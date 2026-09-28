@@ -3,7 +3,7 @@
 #   Task 0 = judge (code API + LLM judge vLLM)
 #   Task 1 = Ray head (gradient updates via grpo_fast.py)
 #   Tasks 2–7 = Ray workers (48 vLLM inference engines)
-#SBATCH --job-name=MultiReward-SLR-Extensional-Format
+#SBATCH --job-name=OlmoLogic-7B-Think
 #SBATCH --partition=all
 #SBATCH --nodes=7
 #SBATCH --gpus-per-node=8
@@ -18,7 +18,7 @@
 #SBATCH --exclude=cn[02,10,35]
 
 # --- 1. Configuration ---
-JOB_NAME="MultiReward-SLR-Extensional-Format"
+JOB_NAME="OlmoLogic-7B-Think"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
@@ -27,6 +27,8 @@ LLM_JUDGE_MODEL="Qwen/Qwen3-32B"
 LLM_JUDGE_PORT=8000
 LLM_JUDGE_NUM_ENGINES=8
 CODE_API_PORT=1234
+
+
 
 export HOME="$BASE_DIR"
 export JOB_NAME="$JOB_NAME"
@@ -88,7 +90,7 @@ APPTAINER_ENV=(
   --env "RAY_ADDRESS=$RAY_ADDRESS"
   --env "RAY_PORT=$RAY_PORT"
   --env "RAY_HEAD_PROCID=1"
-  --env "RAY_DEDUP_LOGS=1"
+  --env "RAY_DEDUP_LOGS=0"
   --env "HOSTED_VLLM_API_BASE=$HOSTED_VLLM_API_BASE"
   --env "CODE_API_URL=$CODE_API_URL"
   --env "CODE_API_PORT=$CODE_API_PORT"
@@ -121,7 +123,7 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --save_traces \
   --dataset_local_cache_dir /stage/.cache/open_instruct_dataset_cache \
   --kl_estimator 2 \
-  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 AIML-TUDA/SLR-Bench:v1-All 5.0 \
+  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 AIML-TUDA/SLR-Bench:v1-All 1.0 \
   --dataset_mixer_list_splits train \
   --dataset_mixer_eval_list allenai/Dolci-Think-RL-7B 8 AIML-TUDA/SLR-Bench:v1-All 4 \
   --dataset_mixer_eval_list_splits train \
@@ -145,9 +147,7 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --vllm_sync_backend nccl \
   --lr_scheduler_type constant \
   --apply_verifiable_reward true \
-  --slr_reward base \
-  --slr_reward_function scaled \
-  --slr_parsing code_block \
+  --slr_reward isomorphic \
   --llm_judge_model hosted_vllm/$LLM_JUDGE_MODEL \
   --llm_judge_timeout 1200 \
   --llm_judge_max_tokens 2048 \

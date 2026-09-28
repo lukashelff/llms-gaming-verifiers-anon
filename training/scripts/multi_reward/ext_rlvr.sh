@@ -2,14 +2,14 @@
 # OLMo-3 7B Think RL (GRPO) on Slurm (8 nodes):
 #   Task 0 = judge (code API + LLM judge vLLM)
 #   Task 1 = Ray head (gradient updates via grpo_fast.py)
-#   Tasks 2–7 = Ray workers (40 vLLM inference engines)
-#SBATCH --job-name=MultiReward-Control-NoSLR
+#   Tasks 2–7 = Ray workers (48 vLLM inference engines)
+#SBATCH --job-name=MultiReward-Ext-RLVR
 #SBATCH --partition=all
 #SBATCH --nodes=7
 #SBATCH --gpus-per-node=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=112
-#SBATCH --mem=1T
+#SBATCH --mem=0
 #SBATCH --time=7-00:00:00
 #SBATCH --output=logs/%x_%j/output.out
 #SBATCH --error=logs/%x_%j/error.err
@@ -18,7 +18,7 @@
 #SBATCH --exclude=cn[02,06,10,13,15,18-19,25,32,35]
 
 # --- 1. Configuration ---
-JOB_NAME="MultiReward-Control-NoSLR"
+JOB_NAME="MultiReward-Ext-RLVR"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
@@ -87,7 +87,8 @@ APPTAINER_ENV=(
   --env "WANDB_API_KEY=$WANDB_API_KEY"
   --env "RAY_ADDRESS=$RAY_ADDRESS"
   --env "RAY_PORT=$RAY_PORT"
-  --env "RAY_DEDUP_LOGS=0"
+  --env "RAY_HEAD_PROCID=1"
+  --env "RAY_DEDUP_LOGS=1"
   --env "HOSTED_VLLM_API_BASE=$HOSTED_VLLM_API_BASE"
   --env "CODE_API_URL=$CODE_API_URL"
   --env "CODE_API_PORT=$CODE_API_PORT"
@@ -99,6 +100,10 @@ APPTAINER_ENV=(
   --env "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1"
   --env "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
   --env "VLLM_LOGGING_LEVEL=WARNING"
+  --env "VLLM_WORKER_MULTIPROC_METHOD=spawn"
+  --env "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt" \
+  --env "REQUESTS_CA_BUNDLE="
+  --env "CURL_CA_BUNDLE="
 )
 
 # --- 5. One srun, N tasks: task 0 = head (Ray + grpo_fast.py), others = workers. Use SLURM_PROCID (hostname can differ in container). ---
@@ -116,16 +121,17 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --save_traces \
   --dataset_local_cache_dir /stage/.cache/open_instruct_dataset_cache \
   --kl_estimator 2 \
-  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 \
+  --dataset_mixer_list allenai/Dolci-Think-RL-7B 1.0 AIML-TUDA/SLR-Bench:v1-All 5.0 \
   --dataset_mixer_list_splits train \
-  --dataset_mixer_eval_list allenai/Dolci-Think-RL-7B 8 \
+  --dataset_mixer_eval_list allenai/Dolci-Think-RL-7B 8 AIML-TUDA/SLR-Bench:v1-All 4 \
   --dataset_mixer_eval_list_splits train \
-  --max_prompt_token_length 2048 \
-  --response_length 32768 \
+  --max_prompt_token_length 5000 \
+  --response_length 25000 \
   --pack_length 35840 \
-  --model_name_or_path allenai/Olmo-3-7B-Think \
+  --model_name_or_path allenai/Olmo-3-7B-Think-DPO \
   --chat_template_name olmo_thinker \
   --non_stop_penalty False \
+  --apply_language_consistency_penalty False \
   --mask_truncated_completions False \
   --temperature 1.0 \
   --ground_truths_key ground_truth \
@@ -139,10 +145,14 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --vllm_sync_backend nccl \
   --lr_scheduler_type constant \
   --apply_verifiable_reward true \
+  --slr_reward base \
+  --slr_reward_function partial \
+  --slr_parsing simple \
   --llm_judge_model hosted_vllm/$LLM_JUDGE_MODEL \
   --llm_judge_timeout 1200 \
   --llm_judge_max_tokens 2048 \
   --llm_judge_max_context_length 32768 \
+  --llm_judge_temperature 0.7 \
   --clip_higher 0.272 \
   --code_api_url $CODE_API_URL \
   --code_pass_rate_reward_threshold 0.99 \

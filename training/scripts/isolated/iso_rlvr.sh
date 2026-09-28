@@ -2,7 +2,7 @@
 # OLMo-3 7B Think RL (GRPO) on Slurm (7 nodes):
 #   Task 0 = Ray head (gradient updates via grpo_fast.py)
 #   Tasks 1–6 = Ray workers (48 vLLM inference engines)
-#SBATCH --job-name=Isolated-SLR-Extensional-Format
+#SBATCH --job-name=Isolated-Iso-RLVR
 #SBATCH --partition=all
 #SBATCH --nodes=6
 #SBATCH --gpus-per-node=8
@@ -14,10 +14,10 @@
 #SBATCH --error=logs/%x_%j/error.err
 #SBATCH --qos=normal
 #SBATCH --open-mode=append
-#SBATCH --exclude=cn[02,10,35]
+#SBATCH --exclude=cn[02,06,10,13,15,18-19,25,32,35]
 
 # --- 1. Configuration ---
-JOB_NAME="Isolated-SLR-Extensional-Format"
+JOB_NAME="Isolated-Iso-RLVR"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
@@ -129,9 +129,9 @@ GRPO_ARGS="--exp_name $JOB_NAME \
   --vllm_sync_backend nccl \
   --lr_scheduler_type constant \
   --apply_verifiable_reward true \
-  --slr_reward base \
-  --slr_reward_function scaled \
-  --slr_parsing code_block \
+  --slr_reward isomorphic \
+  --slr_reward_function partial \
+  --slr_parsing simple \
   --clip_higher 0.272 \
   --seed 1 \
   --local_eval_every -1 \
