@@ -31,7 +31,7 @@ mkdir -p scripts/train/slr && cp /path/to/training/scripts/*.sh scripts/train/sl
 | `reward_hacking_scripts/SLR-NoIsoRL.sh` / `SLR-IsoRL.sh` | isolated SLR-Bench-only RLVR with the extensional / isomorphic verifier (Fig. 2a,b) |
 | `reward_hacking_scripts/SLR-NoIsoRL-with-format.sh` | isolated extensional run with the format reward |
 | `reward_hacking_scripts/Olmo3-SLR-NoIsoRL.sh` / `Olmo3-SLR-IsoRL.sh` | SLR-Bench inside the full Olmo-3 multi-reward mix (Fig. 2c,d) |
-| `SOOFI-L1/Olmo3-SLR-isoRL.sh` | the OlmoLogic run: Olmo-3 mix + isomorphic SLR-Bench reward, 2 epochs / 3,350 steps |
+| `olmologic/Olmo3-SLR-isoRL.sh` | the OlmoLogic run: Olmo-3 mix + isomorphic SLR-Bench reward, 2 epochs / 3,350 steps |
 | `optimization_pressure/olmo3-think-rl.sh` | the control: continued RLVR on the Olmo-3 mix without SLR-Bench |
 | `judge_setup.sh`, `ray_setup.sh`, `code_api_setup.sh` | LLM-judge, Ray, and code-execution services used by the multi-reward runs |
 

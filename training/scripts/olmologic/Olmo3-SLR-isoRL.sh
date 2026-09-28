@@ -3,7 +3,7 @@
 #   Task 0 = judge (code API + LLM judge vLLM)
 #   Task 1 = Ray head (gradient updates via grpo_fast.py)
 #   Tasks 2–7 = Ray workers (48 vLLM inference engines)
-#SBATCH --job-name=SOOFI-L1_1-Olmo3-SLR-IsoRL
+#SBATCH --job-name=OlmoLogic-Olmo3-SLR-IsoRL
 #SBATCH --partition=all
 #SBATCH --nodes=7
 #SBATCH --gpus-per-node=8
@@ -18,7 +18,7 @@
 #SBATCH --exclude=cn[02,10,35]
 
 # --- 1. Configuration ---
-JOB_NAME="SOOFI-L1_1-Olmo3-SLR-IsoRL"
+JOB_NAME="OlmoLogic-Olmo3-SLR-IsoRL"
 BASE_DIR="$OPEN_INSTRUCT_DIR"
 CONTAINER_IMAGE="docker://<your-registry>/open_instruct_dev:slr"
 OUTPUT_DIR="$BASE_DIR/output/$JOB_NAME"
